@@ -12,6 +12,8 @@ import type { LegacyRef } from "react";
 function App() {
   // A reference to the canvas element where we'll render the globe
   const canvasRef = useRef<HTMLCanvasElement>();
+  // Current zoom level of the globe
+  const [zoom, setZoom] = useState(1);
   // The number of markers we're currently displaying
   const [counter, setCounter] = useState(0);
   // A map of marker IDs to their positions
@@ -49,6 +51,22 @@ function App() {
       }
     },
   });
+
+  useEffect(() => {
+    const canvas = canvasRef.current as HTMLCanvasElement | undefined;
+    if (!canvas) return;
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      setZoom((z) => {
+        const next = z - e.deltaY * 0.001;
+        return Math.min(3, Math.max(0.5, next));
+      });
+    };
+    canvas.addEventListener("wheel", handleWheel);
+    return () => {
+      canvas.removeEventListener("wheel", handleWheel);
+    };
+  }, []);
 
   useEffect(() => {
     // The angle of rotation of the globe
@@ -102,7 +120,13 @@ function App() {
       {/* The canvas where we'll render the globe */}
       <canvas
         ref={canvasRef as LegacyRef<HTMLCanvasElement>}
-        style={{ width: 400, height: 400, maxWidth: "100%", aspectRatio: 1 }}
+        style={{
+          width: 400,
+          height: 400,
+          maxWidth: "100%",
+          aspectRatio: 1,
+          transform: `scale(${zoom})`,
+        }}
       />
 
       {/* Let's give some credit */}
