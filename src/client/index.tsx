@@ -16,6 +16,12 @@ function App() {
   const [zoom, setZoom] = useState(1);
   // The number of markers we're currently displaying
   const [counter, setCounter] = useState(0);
+  // Rotation speed of the globe
+  const [rotationSpeed, setRotationSpeed] = useState(0.01);
+  const rotationSpeedRef = useRef(rotationSpeed);
+  useEffect(() => {
+    rotationSpeedRef.current = rotationSpeed;
+  }, [rotationSpeed]);
   // A map of marker IDs to their positions
   // Note that we use a ref because the globe's `onRender` callback
   // is called on every animation frame, and we don't want to re-render
@@ -97,7 +103,7 @@ function App() {
 
         // Rotate the globe
         state.phi = phi;
-        phi += 0.01;
+        phi += rotationSpeedRef.current;
       },
     });
 
@@ -116,6 +122,19 @@ function App() {
       ) : (
         <p>&nbsp;</p>
       )}
+
+      <div className="speed-control">
+        <label htmlFor="speedRange">Rotation Speed: {rotationSpeed.toFixed(2)}</label>
+        <input
+          id="speedRange"
+          type="range"
+          min="0"
+          max="0.05"
+          step="0.001"
+          value={rotationSpeed}
+          onChange={(e) => setRotationSpeed(parseFloat(e.target.value))}
+        />
+      </div>
 
       {/* The canvas where we'll render the globe */}
       <canvas
