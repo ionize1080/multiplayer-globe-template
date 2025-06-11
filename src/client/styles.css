@@ -102,3 +102,16 @@ a {
   box-shadow: 0 0 4px rgba(255, 255, 255, 0.6);
   cursor: pointer;
 }
+
+.weather-bar {
+  position: fixed;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: white;
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(4px);
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}

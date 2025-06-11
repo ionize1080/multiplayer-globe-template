@@ -79,6 +79,15 @@ export class Globe extends Server {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/api/location") {
+      const cf = request.cf as Record<string, string | undefined>;
+      return Response.json({
+        city: cf?.city ?? "",
+        latitude: cf?.latitude ?? "",
+        longitude: cf?.longitude ?? "",
+      });
+    }
     return (
       (await routePartykitRequest(request, { ...env })) ||
       new Response("Not Found", { status: 404 })

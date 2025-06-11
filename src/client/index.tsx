@@ -22,6 +22,79 @@ function App() {
   useEffect(() => {
     rotationSpeedRef.current = rotationSpeed;
   }, [rotationSpeed]);
+
+  // Location and weather information
+  const [location, setLocation] = useState<{
+    city: string;
+    latitude: number;
+    longitude: number;
+  } | null>(null);
+  const [weather, setWeather] = useState<{
+    temperature: number;
+    description: string;
+  } | null>(null);
+
+  useEffect(() => {
+    async function loadLocation() {
+      try {
+        const res = await fetch("/api/location");
+        if (!res.ok) return;
+        const data = await res.json();
+        setLocation({
+          city: data.city,
+          latitude: parseFloat(data.latitude),
+          longitude: parseFloat(data.longitude),
+        });
+
+        const weatherRes = await fetch(
+          `https://api.open-meteo.com/v1/forecast?latitude=${data.latitude}&longitude=${data.longitude}&current_weather=true&timezone=auto`,
+        );
+        if (!weatherRes.ok) return;
+        const weatherData = await weatherRes.json();
+
+        const code = weatherData.current_weather.weathercode as number;
+        const descriptions: Record<number, string> = {
+          0: "Clear",
+          1: "Mainly clear",
+          2: "Partly cloudy",
+          3: "Overcast",
+          45: "Fog",
+          48: "Fog",
+          51: "Drizzle",
+          53: "Drizzle",
+          55: "Drizzle",
+          56: "Freezing drizzle",
+          57: "Freezing drizzle",
+          61: "Rain",
+          63: "Rain",
+          65: "Rain",
+          66: "Freezing rain",
+          67: "Freezing rain",
+          71: "Snow",
+          73: "Snow",
+          75: "Snow",
+          77: "Snow grains",
+          80: "Rain showers",
+          81: "Rain showers",
+          82: "Rain showers",
+          85: "Snow showers",
+          86: "Snow showers",
+          95: "Thunderstorm",
+          96: "Thunderstorm",
+          99: "Thunderstorm",
+        };
+
+        setWeather({
+          temperature: weatherData.current_weather.temperature,
+          description: descriptions[code] || "Unknown",
+        });
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    loadLocation();
+  }, []);
   // A map of marker IDs to their positions
   // Note that we use a ref because the globe's `onRender` callback
   // is called on every animation frame, and we don't want to re-render
@@ -154,6 +227,15 @@ function App() {
         <a href="https://www.npmjs.com/package/phenomenon">Phenomenon</a> and{" "}
         <a href="https://npmjs.com/package/partyserver/">🎈 PartyServer</a>
       </p>
+
+      {location && weather && (
+        <div className="weather-bar">
+          {location.city && <span>{location.city}&nbsp;</span>}
+          <span>
+            {weather.temperature.toFixed(1)}°C, {weather.description}
+          </span>
+        </div>
+      )}
     </div>
   );
 }
