@@ -1,6 +1,20 @@
 import "./styles.css";
 
 import React, { useEffect, useRef, useState } from "react";
+import type { IconType } from "react-icons";
+import {
+  WiDaySunny,
+  WiDayCloudy,
+  WiCloud,
+  WiFog,
+  WiSprinkle,
+  WiSleet,
+  WiRain,
+  WiSnow,
+  WiShowers,
+  WiSnowWind,
+  WiThunderstorm,
+} from "react-icons/wi";
 import { createRoot } from "react-dom/client";
 import createGlobe from "cobe";
 import usePartySocket from "partysocket/react";
@@ -32,6 +46,7 @@ function App() {
   const [weather, setWeather] = useState<{
     temperature: number;
     description: string;
+    Icon: IconType;
   } | null>(null);
 
   useEffect(() => {
@@ -83,10 +98,41 @@ function App() {
           96: "Thunderstorm",
           99: "Thunderstorm",
         };
+        const iconMap: Record<number, IconType> = {
+          0: WiDaySunny,
+          1: WiDaySunny,
+          2: WiDayCloudy,
+          3: WiCloud,
+          45: WiFog,
+          48: WiFog,
+          51: WiSprinkle,
+          53: WiSprinkle,
+          55: WiSprinkle,
+          56: WiSleet,
+          57: WiSleet,
+          61: WiRain,
+          63: WiRain,
+          65: WiRain,
+          66: WiRain,
+          67: WiRain,
+          71: WiSnow,
+          73: WiSnow,
+          75: WiSnow,
+          77: WiSnow,
+          80: WiShowers,
+          81: WiShowers,
+          82: WiShowers,
+          85: WiSnowWind,
+          86: WiSnowWind,
+          95: WiThunderstorm,
+          96: WiThunderstorm,
+          99: WiThunderstorm,
+        };
 
         setWeather({
           temperature: weatherData.current_weather.temperature,
           description: descriptions[code] || "Unknown",
+          Icon: iconMap[code] || WiDaySunny,
         });
       } catch (err) {
         console.error(err);
@@ -231,6 +277,7 @@ function App() {
       {location && weather && (
         <div className="weather-bar">
           {location.city && <span>{location.city}&nbsp;</span>}
+          <weather.Icon className="weather-icon" />
           <span>
             {weather.temperature.toFixed(1)}°C, {weather.description}
           </span>
