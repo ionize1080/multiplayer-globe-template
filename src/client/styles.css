@@ -120,12 +120,13 @@ a {
   display: inline-block;
   margin-right: 0.25rem;
   font-size: 1.5rem;
+  vertical-align: middle;
   animation: weather-pop 0.4s ease forwards;
   transition: transform 0.2s ease;
 }
 
-.weather-icon:hover {
-  transform: scale(1.2);
+.weather-bar:hover .weather-icon {
+  animation: weather-bounce 0.4s ease;
 }
 
 @keyframes weather-pop {
@@ -133,6 +134,18 @@ a {
     transform: scale(0);
   }
   to {
+    transform: scale(1);
+  }
+}
+
+@keyframes weather-bounce {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.25);
+  }
+  100% {
     transform: scale(1);
   }
 }
