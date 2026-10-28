@@ -39,6 +39,8 @@ type GlobeThreeOptions = {
   getStarlinkDensity?: () => number;
   /** Starlink point opacity (0.05–1); default ~0.42 */
   getStarlinkBrightness?: () => number;
+  /** Day-hemisphere shader gain (uDayBoost); default ~1.55 */
+  getDayBrightness?: () => number;
   /** "rotate" = auto-spin; "drag" = pointer orbit (mutually exclusive) */
   getInteractionMode?: () => "rotate" | "drag";
 };
@@ -81,12 +83,21 @@ function hasStoredViewPose(): boolean {
 }
 
 let memViewPose: GlobeViewPose = readStoredViewPose();
+/** Only the newest createGlobeThree instance may write pose (Alan E3 remount race). */
+let activeGlobeId = 0;
+let nextGlobeId = 1;
 
 export function getMemViewPose(): GlobeViewPose {
   return { ...memViewPose };
 }
 
-function persistViewPose(theta: number, phi: number, camYaw?: number) {
+function persistViewPose(
+  theta: number,
+  phi: number,
+  camYaw: number | undefined,
+  globeId: number,
+) {
+  if (globeId !== activeGlobeId) return;
   memViewPose = {
     theta,
     phi,
@@ -110,7 +121,7 @@ const CLOUD_TEX_FALLBACK =
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
 export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 /** ISS far-side dim + visitor ripple markers */
-export const GLOBE_FX_BUILD = "fx7b-20261028-sun-rotate-reset";
+export const GLOBE_FX_BUILD = "fx8-20261028-sun-daybright";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -299,7 +310,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const dayNightUniforms = {
     uNightMap: { value: null as THREE.Texture | null },
     uSunDir: { value: sunDir.clone() },
-    uDayBoost: { value: 1.38 },
+    uDayBoost: { value: 1.55 },
     uNightFloor: { value: 0.28 },
     uCityBoost: { value: 2.8 },
     uTermSoft: { value: 0.32 },
@@ -1443,13 +1454,13 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       map: sunTex,
       color: 0xfde68a,
       transparent: true,
-      opacity: 0.95,
+      opacity: 1,
       depthTest: true, // occlude when sun is behind Earth (fx7 pierce fix)
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     }),
   );
-  sunSprite.scale.setScalar(0.22);
+  sunSprite.scale.setScalar(0.32);
   sunSprite.renderOrder = 30;
   sunSprite.frustumCulled = false;
   scene.add(sunSprite); // world space — not under root
@@ -1458,13 +1469,13 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       map: sunTex,
       color: 0xfbbf24,
       transparent: true,
-      opacity: 0.35,
+      opacity: 0.5,
       depthTest: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     }),
   );
-  sunBeam.scale.setScalar(0.42);
+  sunBeam.scale.setScalar(0.58);
   sunBeam.renderOrder = 29;
   sunBeam.frustumCulled = false;
   scene.add(sunBeam);
@@ -1477,14 +1488,19 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   let dragVelY = 0;
   let dragVelX = 0;
   // Restore pose from module/session — remount must not snap to default
+  const globeId = nextGlobeId++;
+  activeGlobeId = globeId;
   let viewTheta = memViewPose.theta;
   let viewPhi = memViewPose.phi;
   // Camera yaw orbits around Y so world-fixed sun can sit on the RIGHT limb.
   // viewTheta only spins Earth under the sun — it cannot move the glyph on screen.
   let camYaw = typeof memViewPose.camYaw === "number" ? memViewPose.camYaw : 0;
-  let sunFramed = typeof memViewPose.camYaw === "number" || hasStoredViewPose();
+  // Only skip auto-frame when an explicit camYaw was stored (old poses without camYaw must frame)
+  let sunFramed = typeof memViewPose.camYaw === "number";
   let lastPosePersist = 0;
   const camAlong = new THREE.Vector3();
+  /** Target sun·cam ≈ +0.12 so disk is slightly >half lit and glyph sits just outside limb. */
+  const RIGHT_LIMB_FACING = 0.12;
 
   function applyCameraYaw() {
     camera.position.set(CAM_DIST * Math.sin(camYaw), 0, CAM_DIST * Math.cos(camYaw));
@@ -1492,13 +1508,18 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   }
   applyCameraYaw();
 
-  /** Place sun glyph near the right limb (half-lit disk) without biasing sunDir. */
+  /**
+   * Place sun glyph near the right limb (half-lit disk) without biasing sunDir.
+   * Empirically verified: atan2(sx,sz) - π/2 puts sun on camera +X (screen right);
+   * +π/2 puts it on the left. Parent brief said "+", but +X check wins.
+   */
   function frameSunToRightLimb() {
-    // yaw = sunAzimuth - π/2 → liveSun projects to +X (screen right) at the limb
-    camYaw = Math.atan2(liveSun.x, liveSun.z) - Math.PI / 2;
+    const az = Math.atan2(liveSun.x, liveSun.z);
+    // Base limb (facing≈0, sun on +X) then bias camera slightly toward sun
+    camYaw = az - Math.PI / 2 + RIGHT_LIMB_FACING;
     applyCameraYaw();
     sunFramed = true;
-    persistViewPose(viewTheta, viewPhi, camYaw);
+    persistViewPose(viewTheta, viewPhi, camYaw, globeId);
   }
   const DRAG_PHI_MIN = -0.85;
   const DRAG_PHI_MAX = 0.95;
@@ -1553,6 +1574,9 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     viewPhi = Math.min(DRAG_PHI_MAX, Math.max(DRAG_PHI_MIN, viewPhi + dy * DRAG_SENS));
     dragVelY = dx * DRAG_SENS;
     dragVelX = dy * DRAG_SENS;
+    // Persist every move so remount cannot restore a stale mid-drag snapshot (E3)
+    persistViewPose(viewTheta, viewPhi, camYaw, globeId);
+    lastPosePersist = performance.now();
   }
   function onPointerUp(e: PointerEvent) {
     if (dragPointerId !== e.pointerId) return;
@@ -1648,24 +1672,29 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
     const now = new Date();
     updateSun(now);
+    // Only after real updateSun — never frame with placeholder liveSun
     if (!sunFramed) frameSunToRightLimb();
     applyCameraYaw();
-    // Facing fade: hide glyph when sun is behind Earth from camera (Alan P0)
+    // Day brightness slider → shader uDayBoost (does not fake sunDir)
+    const dayBright = Math.min(2.4, Math.max(0.8, opts.getDayBrightness?.() ?? 1.55));
+    dayNightUniforms.uDayBoost.value = dayBright;
+    // Limb-friendly fade: hide when clearly behind; full near limb / slightly camera-side
+    // (old smoothstep(-0.02,0.12) killed opacity at facing≈0 — Alan fx7b FAIL)
     camAlong.copy(camera.position).normalize();
     const sunFacing = liveSun.dot(camAlong);
-    const sunFade = THREE.MathUtils.smoothstep(sunFacing, -0.02, 0.12);
-    // Slightly push glyph outside atmosphere near the limb (Aura)
+    const hideBehind = THREE.MathUtils.smoothstep(sunFacing, -0.25, -0.05);
+    const sunFade = hideBehind; // ≈1 for facing ≳ -0.05 (limb + day side)
     const limbOut =
-      0.07 * (1 - THREE.MathUtils.smoothstep(Math.abs(sunFacing), 0.0, 0.35));
-    const sunR = 1.28 + limbOut;
-    const beamR = 1.22 + limbOut * 0.85;
+      0.1 * (1 - THREE.MathUtils.smoothstep(Math.abs(sunFacing), 0.0, 0.4));
+    const sunR = 1.32 + limbOut;
+    const beamR = 1.24 + limbOut * 0.85;
     sunSprite.position.copy(liveSun).multiplyScalar(sunR);
     sunBeam.position.copy(liveSun).multiplyScalar(beamR);
-    (sunSprite.material as THREE.SpriteMaterial).opacity = 0.95 * sunFade;
-    (sunBeam.material as THREE.SpriteMaterial).opacity = 0.35 * sunFade;
+    (sunSprite.material as THREE.SpriteMaterial).opacity = 1.0 * sunFade;
+    (sunBeam.material as THREE.SpriteMaterial).opacity = 0.55 * sunFade;
     const sunPulse = 0.5 + 0.5 * Math.sin(time * 0.002);
-    sunSprite.scale.setScalar(0.2 + 0.04 * sunPulse);
-    sunBeam.scale.setScalar(0.38 + 0.06 * sunPulse);
+    sunSprite.scale.setScalar(0.3 + 0.05 * sunPulse);
+    sunBeam.scale.setScalar(0.55 + 0.08 * sunPulse);
 
     // Orbit rebuild whenever TLE is available
     if (showIss && ensureSatrec() && (time - lastOrbitBuild > 20_000 || lastOrbitBuild === 0)) {
@@ -1758,9 +1787,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     root.rotation.y = viewTheta;
     root.rotation.x = viewPhi;
     phi = viewTheta;
-    if (time - lastPosePersist > 250) {
+    // Drag mode: persist often so remount restores latest tilt (E3 ~33s snap-back)
+    const persistEvery = interactionMode === "drag" ? 50 : 250;
+    if (time - lastPosePersist > persistEvery) {
       lastPosePersist = time;
-      persistViewPose(viewTheta, viewPhi, camYaw);
+      persistViewPose(viewTheta, viewPhi, camYaw, globeId);
     }
 
     root.updateMatrixWorld(true);
@@ -1776,7 +1807,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   return {
     destroy() {
-      persistViewPose(viewTheta, viewPhi, camYaw);
+      persistViewPose(viewTheta, viewPhi, camYaw, globeId);
       running = false;
       cancelAnimationFrame(raf);
       liveLoadToken += 1;

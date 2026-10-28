@@ -26,6 +26,9 @@ type MarketQuote = {
   changePct: number | null;
   currency: string;
   sparkline: number[];
+  /** spot = RTH cash index; futures = after-hours ES/NQ etc. */
+  kind?: "spot" | "futures";
+  session?: "rth" | "futures";
 };
 
 type IssData = {
@@ -383,6 +386,13 @@ function App() {
   }, [starlinkBrightness]);
   const [starlinkDrawn, setStarlinkDrawn] = useState(0);
 
+  // Day-hemisphere brightness (shader uDayBoost) — user t104u
+  const [dayBrightness, setDayBrightness] = useState(1.55);
+  const dayBrightnessRef = useRef(dayBrightness);
+  useEffect(() => {
+    dayBrightnessRef.current = dayBrightness;
+  }, [dayBrightness]);
+
   const [starlinkStats, setStarlinkStats] = useState<StarlinkStats | null>(null);
   const [starlinkError, setStarlinkError] = useState<string | null>(null);
   const [starlinkLoading, setStarlinkLoading] = useState(false);
@@ -467,6 +477,7 @@ function App() {
       getShowStarlink: () => showStarlinkRef.current,
       getStarlinkDensity: () => starlinkDensityRef.current,
       getStarlinkBrightness: () => starlinkBrightnessRef.current,
+      getDayBrightness: () => dayBrightnessRef.current,
       getInteractionMode: () => interactionModeRef.current,
     });
     globeApiRef.current = globe;
@@ -999,6 +1010,20 @@ function App() {
               ) : null}
             </div>
             <div className="control-block">
+              <label htmlFor="dayBrightRange">
+                昼侧亮度 <b>{dayBrightness.toFixed(2)}</b>
+              </label>
+              <input
+                id="dayBrightRange"
+                type="range"
+                min="0.9"
+                max="2.2"
+                step="0.05"
+                value={dayBrightness}
+                onChange={(e) => setDayBrightness(parseFloat(e.target.value))}
+              />
+            </div>
+            <div className="control-block">
               <label htmlFor="cloudRange">
                 Clouds <b>{Math.round(cloudAmount * 100)}%</b>
               </label>
@@ -1063,7 +1088,11 @@ function App() {
           <section className="card markets-card">
             <div className="card-head">
               <h2>Markets</h2>
-              <span className="chip">Yahoo · 1D</span>
+              <span className="chip">
+                {data?.markets?.some((m) => m.kind === "futures")
+                  ? "Yahoo · futures"
+                  : "Yahoo · 1D"}
+              </span>
             </div>
             {status === "loading" && !data ? (
               <div className="market-list">
@@ -1083,7 +1112,12 @@ function App() {
                     >
                       <div className="market-top">
                         <div>
-                          <div className="market-symbol">{m.symbol}</div>
+                          <div className="market-symbol">
+                            {m.symbol}
+                            {m.kind === "futures" ? (
+                              <span className="fut-tag"> FUT</span>
+                            ) : null}
+                          </div>
                           <div className="market-name">{m.name}</div>
                         </div>
                         <div className="market-price">

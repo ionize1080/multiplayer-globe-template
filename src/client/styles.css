@@ -147,12 +147,23 @@ a:hover {
   grid-template-columns: minmax(240px, 300px) minmax(280px, 1fr) minmax(260px, 340px);
   gap: 1rem;
   align-items: start;
+  position: relative;
+  overflow: visible;
 }
 
+/* Symmetric stacking: zoomed globe must occlude BOTH rails (t105u).
+   DOM order is left → stage → right, so without z-index the right rail
+   paints over the globe while the left does not. */
 .rail {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  position: relative;
+  z-index: 1;
+}
+.left-rail,
+.right-rail {
+  z-index: 1;
 }
 
 .card {
@@ -368,6 +379,8 @@ a:hover {
   gap: 1rem;
   min-height: 560px;
   overflow: visible;
+  position: relative;
+  z-index: 3; /* above both rails — zoom occlusion symmetric */
 }
 
 .globe-wrap {
@@ -376,6 +389,7 @@ a:hover {
   aspect-ratio: 1 / 1;
   display: block;
   overflow: visible;
+  z-index: 3;
 }
 
 .globe-scene {
@@ -384,6 +398,7 @@ a:hover {
   transform-origin: center center;
   will-change: transform;
   overflow: visible;
+  z-index: 3;
 }
 
 .globe-canvas {
@@ -815,4 +830,13 @@ a:hover {
   box-shadow: 0 0 10px rgba(165, 180, 252, 0.7);
   margin-top: -4px;
   cursor: pointer;
+}
+
+.fut-tag {
+  font-size: 0.65em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #fbbf24;
+  margin-left: 0.25rem;
+  vertical-align: super;
 }
