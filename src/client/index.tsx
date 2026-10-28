@@ -1,150 +1,245 @@
 import "./styles.css";
 
-import React, { useEffect, useRef, useState } from "react";
-import type { IconType } from "react-icons";
-import {
-  WiDaySunny,
-  WiDayCloudy,
-  WiCloud,
-  WiFog,
-  WiSprinkle,
-  WiSleet,
-  WiRain,
-  WiSnow,
-  WiShowers,
-  WiSnowWind,
-  WiThunderstorm,
-} from "react-icons/wi";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import createGlobe from "cobe";
 import usePartySocket from "partysocket/react";
-
-// The type of messages we'll be receiving from the server
-import type { OutgoingMessage } from "../shared";
 import type { LegacyRef } from "react";
 
+import type { OutgoingMessage } from "../shared";
+
+type MarketQuote = {
+  symbol: string;
+  yahoo: string;
+  name: string;
+  price: number | null;
+  previousClose: number | null;
+  change: number | null;
+  changePct: number | null;
+  currency: string;
+  sparkline: number[];
+};
+
+type IssData = {
+  latitude: number;
+  longitude: number;
+  altitude: number;
+  velocity: number;
+  visibility: string;
+};
+
+type WeatherData = {
+  city: string;
+  temperature: number;
+  humidity: number;
+  windSpeed: number;
+  weatherCode: number;
+  description: string;
+};
+
+type DashboardPayload = {
+  updatedAt: string;
+  iss: IssData | null;
+  markets: MarketQuote[];
+  weather: WeatherData | null;
+  errors: string[];
+};
+
+type ClockZone = {
+  id: string;
+  label: string;
+  city: string;
+  timeZone: string;
+};
+
+const CLOCKS: ClockZone[] = [
+  { id: "sg", label: "SGT", city: "Singapore", timeZone: "Asia/Singapore" },
+  { id: "sh", label: "CST", city: "Shanghai", timeZone: "Asia/Shanghai" },
+  { id: "utc", label: "UTC", city: "Coordinated", timeZone: "UTC" },
+];
+
+const ISS_MARKER_ID = "__iss__";
+
+function formatPrice(n: number | null, currency: string): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  const digits = n >= 1000 ? 0 : n >= 100 ? 1 : 2;
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: currency === "CNY" ? "CNY" : currency === "HKD" ? "HKD" : "USD",
+      maximumFractionDigits: digits,
+      minimumFractionDigits: digits,
+    }).format(n);
+  } catch {
+    return n.toFixed(digits);
+  }
+}
+
+function formatSigned(n: number | null, digits = 2): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(digits)}`;
+}
+
+function useNow(tickMs = 1000) {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), tickMs);
+    return () => window.clearInterval(id);
+  }, [tickMs]);
+  return now;
+}
+
+function useDashboard(pollMs = 45_000) {
+  const [data, setData] = useState<DashboardPayload | null>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+
+    async function load(isRefresh: boolean) {
+      if (!isRefresh) setStatus((s) => (s === "ready" ? s : "loading"));
+      try {
+        const res = await fetch("/api/dashboard");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as DashboardPayload;
+        if (cancelled) return;
+        setData(json);
+        setStatus("ready");
+        setError(null);
+      } catch (e) {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : String(e));
+        setStatus((s) => (s === "ready" ? "ready" : "error"));
+      } finally {
+        if (!cancelled) {
+          timer = window.setTimeout(() => load(true), pollMs);
+        }
+      }
+    }
+
+    load(false);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [pollMs]);
+
+  return { data, status, error };
+}
+
+function Sparkline({
+  values,
+  positive,
+}: {
+  values: number[];
+  positive: boolean | null;
+}) {
+  const path = useMemo(() => {
+    if (!values.length) return "";
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const span = max - min || 1;
+    const w = 120;
+    const h = 36;
+    return values
+      .map((v, i) => {
+        const x = (i / Math.max(values.length - 1, 1)) * w;
+        const y = h - ((v - min) / span) * (h - 4) - 2;
+        return `${i === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
+      })
+      .join(" ");
+  }, [values]);
+
+  const stroke =
+    positive == null ? "#94a3b8" : positive ? "#34d399" : "#f87171";
+  const fill =
+    positive == null
+      ? "rgba(148,163,184,0.12)"
+      : positive
+        ? "rgba(52,211,153,0.16)"
+        : "rgba(248,113,113,0.16)";
+
+  return (
+    <svg className="sparkline" viewBox="0 0 120 36" preserveAspectRatio="none" aria-hidden>
+      <path d={`${path} L120 36 L0 36 Z`} fill={fill} stroke="none" />
+      <path d={path} fill="none" stroke={stroke} strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function AltitudeGauge({ altitudeKm }: { altitudeKm: number | null }) {
+  // ISS typically ~400–430 km
+  const min = 350;
+  const max = 450;
+  const value = altitudeKm ?? 400;
+  const t = Math.min(1, Math.max(0, (value - min) / (max - min)));
+  const angle = -120 + t * 240;
+  const rad = (angle * Math.PI) / 180;
+  const cx = 50;
+  const cy = 52;
+  const r = 36;
+  const x = cx + r * Math.cos(rad);
+  const y = cy + r * Math.sin(rad);
+
+  const start = polar(cx, cy, r, -120);
+  const end = polar(cx, cy, r, 120);
+
+  return (
+    <svg className="gauge" viewBox="0 0 100 70" aria-hidden>
+      <path
+        d={`M ${start.x} ${start.y} A ${r} ${r} 0 1 1 ${end.x} ${end.y}`}
+        className="gauge-track"
+      />
+      <path
+        d={`M ${start.x} ${start.y} A ${r} ${r} 0 ${t > 0.5 ? 1 : 0} 1 ${x} ${y}`}
+        className="gauge-value"
+      />
+      <circle cx={x} cy={y} r="3.5" className="gauge-knob" />
+      <text x="50" y="50" textAnchor="middle" className="gauge-text">
+        {altitudeKm != null ? altitudeKm.toFixed(0) : "—"}
+      </text>
+      <text x="50" y="62" textAnchor="middle" className="gauge-sub">
+        km alt
+      </text>
+    </svg>
+  );
+}
+
+function polar(cx: number, cy: number, r: number, deg: number) {
+  const rad = (deg * Math.PI) / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function SkeletonCard() {
+  return (
+    <div className="card skeleton-card">
+      <div className="skel skel-title" />
+      <div className="skel skel-line" />
+      <div className="skel skel-line short" />
+    </div>
+  );
+}
+
 function App() {
-  // A reference to the canvas element where we'll render the globe
   const canvasRef = useRef<HTMLCanvasElement>();
-  // Current zoom level of the globe
   const [zoom, setZoom] = useState(1);
-  // The number of markers we're currently displaying
   const [counter, setCounter] = useState(0);
-  // Rotation speed of the globe
-  const [rotationSpeed, setRotationSpeed] = useState(0.01);
+  const [rotationSpeed, setRotationSpeed] = useState(0.008);
   const rotationSpeedRef = useRef(rotationSpeed);
   useEffect(() => {
     rotationSpeedRef.current = rotationSpeed;
   }, [rotationSpeed]);
 
-  // Location and weather information
-  const [location, setLocation] = useState<{
-    city: string;
-    latitude: number;
-    longitude: number;
-  } | null>(null);
-  const [weather, setWeather] = useState<{
-    temperature: number;
-    description: string;
-    Icon: IconType;
-  } | null>(null);
-
+  const now = useNow(1000);
+  const { data, status, error } = useDashboard(45_000);
+  const issRef = useRef<IssData | null>(null);
   useEffect(() => {
-    async function loadLocation() {
-      try {
-        const res = await fetch("/api/location");
-        if (!res.ok) return;
-        const data = await res.json();
-        setLocation({
-          city: data.city,
-          latitude: parseFloat(data.latitude),
-          longitude: parseFloat(data.longitude),
-        });
+    issRef.current = data?.iss ?? null;
+  }, [data?.iss]);
 
-        const weatherRes = await fetch(
-          `https://api.open-meteo.com/v1/forecast?latitude=${data.latitude}&longitude=${data.longitude}&current_weather=true&timezone=auto`,
-        );
-        if (!weatherRes.ok) return;
-        const weatherData = await weatherRes.json();
-
-        const code = weatherData.current_weather.weathercode as number;
-        const descriptions: Record<number, string> = {
-          0: "Clear",
-          1: "Mainly clear",
-          2: "Partly cloudy",
-          3: "Overcast",
-          45: "Fog",
-          48: "Fog",
-          51: "Drizzle",
-          53: "Drizzle",
-          55: "Drizzle",
-          56: "Freezing drizzle",
-          57: "Freezing drizzle",
-          61: "Rain",
-          63: "Rain",
-          65: "Rain",
-          66: "Freezing rain",
-          67: "Freezing rain",
-          71: "Snow",
-          73: "Snow",
-          75: "Snow",
-          77: "Snow grains",
-          80: "Rain showers",
-          81: "Rain showers",
-          82: "Rain showers",
-          85: "Snow showers",
-          86: "Snow showers",
-          95: "Thunderstorm",
-          96: "Thunderstorm",
-          99: "Thunderstorm",
-        };
-        const iconMap: Record<number, IconType> = {
-          0: WiDaySunny,
-          1: WiDaySunny,
-          2: WiDayCloudy,
-          3: WiCloud,
-          45: WiFog,
-          48: WiFog,
-          51: WiSprinkle,
-          53: WiSprinkle,
-          55: WiSprinkle,
-          56: WiSleet,
-          57: WiSleet,
-          61: WiRain,
-          63: WiRain,
-          65: WiRain,
-          66: WiRain,
-          67: WiRain,
-          71: WiSnow,
-          73: WiSnow,
-          75: WiSnow,
-          77: WiSnow,
-          80: WiShowers,
-          81: WiShowers,
-          82: WiShowers,
-          85: WiSnowWind,
-          86: WiSnowWind,
-          95: WiThunderstorm,
-          96: WiThunderstorm,
-          99: WiThunderstorm,
-        };
-
-        setWeather({
-          temperature: weatherData.current_weather.temperature,
-          description: descriptions[code] || "Unknown",
-          Icon: iconMap[code] || WiDaySunny,
-        });
-      } catch (err) {
-        console.error(err);
-      }
-    }
-
-    loadLocation();
-  }, []);
-  // A map of marker IDs to their positions
-  // Note that we use a ref because the globe's `onRender` callback
-  // is called on every animation frame, and we don't want to re-render
-  // the component on every frame.
   const positions = useRef<
     Map<
       string,
@@ -154,24 +249,20 @@ function App() {
       }
     >
   >(new Map());
-  // Connect to the PartyServer server
+
   const socket = usePartySocket({
     room: "default",
     party: "globe",
     onMessage(evt) {
       const message = JSON.parse(evt.data as string) as OutgoingMessage;
       if (message.type === "add-marker") {
-        // Add the marker to our map
         positions.current.set(message.position.id, {
           location: [message.position.lat, message.position.lng],
           size: message.position.id === socket.id ? 0.1 : 0.05,
         });
-        // Update the counter
         setCounter((c) => c + 1);
       } else {
-        // Remove the marker from our map
         positions.current.delete(message.id);
-        // Update the counter
         setCounter((c) => c - 1);
       }
     },
@@ -188,104 +279,292 @@ function App() {
       });
     };
     canvas.addEventListener("wheel", handleWheel);
-    return () => {
-      canvas.removeEventListener("wheel", handleWheel);
-    };
+    return () => canvas.removeEventListener("wheel", handleWheel);
   }, []);
 
   useEffect(() => {
-    // The angle of rotation of the globe
-    // We'll update this on every frame to make the globe spin
     let phi = 0;
+    let width = 520;
+
+    const onResize = () => {
+      // keep logical size stable; CSS scales
+      width = 520;
+    };
+    onResize();
+    window.addEventListener("resize", onResize);
 
     const globe = createGlobe(canvasRef.current as HTMLCanvasElement, {
       devicePixelRatio: 2,
-      width: 400 * 2,
-      height: 400 * 2,
+      width: width * 2,
+      height: width * 2,
       phi: 0,
-      theta: 0,
+      theta: 0.15,
       dark: 1,
-      diffuse: 0.8,
-      mapSamples: 16000,
-      mapBrightness: 6,
-      baseColor: [0.3, 0.3, 0.3],
-      markerColor: [0.8, 0.1, 0.1],
-      glowColor: [0.2, 0.2, 0.2],
+      diffuse: 1.1,
+      mapSamples: 18000,
+      mapBrightness: 6.2,
+      baseColor: [0.12, 0.18, 0.32],
+      markerColor: [0.35, 0.85, 1],
+      glowColor: [0.15, 0.25, 0.55],
       markers: [],
-      opacity: 0.7,
+      opacity: 0.85,
       onRender: (state) => {
-        // Called on every animation frame.
-        // `state` will be an empty object, return updated params.
+        // visitor markers
+        const markers = [...positions.current.entries()]
+          .filter(([id]) => id !== ISS_MARKER_ID)
+          .map(([, v]) => v);
 
-        // Get the current positions from our map
-        state.markers = [...positions.current.values()];
+        const iss = issRef.current;
+        if (iss) {
+          const pulse = 0.11 + 0.05 * (0.5 + 0.5 * Math.sin(phi * 18));
+          markers.push({
+            location: [iss.latitude, iss.longitude],
+            size: pulse,
+          });
+          positions.current.set(ISS_MARKER_ID, {
+            location: [iss.latitude, iss.longitude],
+            size: pulse,
+          });
+        } else {
+          positions.current.delete(ISS_MARKER_ID);
+        }
 
-        // Rotate the globe
+        state.markers = markers;
         state.phi = phi;
         phi += rotationSpeedRef.current;
       },
     });
 
     return () => {
+      window.removeEventListener("resize", onResize);
       globe.destroy();
     };
   }, []);
 
+  const clocks = CLOCKS.map((z) => {
+    const time = new Intl.DateTimeFormat("en-GB", {
+      timeZone: z.timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).format(now);
+    const date = new Intl.DateTimeFormat("en-GB", {
+      timeZone: z.timeZone,
+      weekday: "short",
+      day: "2-digit",
+      month: "short",
+    }).format(now);
+    return { ...z, time, date };
+  });
+
   return (
-    <div className="App">
-      <h1>Where's everyone at?</h1>
-      {counter !== 0 ? (
-        <p>
-          <b>{counter}</b> {counter === 1 ? "person" : "people"} connected.
-        </p>
-      ) : (
-        <p>&nbsp;</p>
-      )}
+    <div className="page">
+      <div className="bg-grid" aria-hidden />
+      <div className="bg-glow" aria-hidden />
 
-      <div className="speed-control">
-        <label htmlFor="speedRange">Rotation Speed: {rotationSpeed.toFixed(2)}</label>
-        <input
-          id="speedRange"
-          type="range"
-          min="0"
-          max="0.05"
-          step="0.001"
-          value={rotationSpeed}
-          onChange={(e) => setRotationSpeed(parseFloat(e.target.value))}
-        />
-      </div>
-
-      {/* The canvas where we'll render the globe */}
-      <canvas
-        ref={canvasRef as LegacyRef<HTMLCanvasElement>}
-        style={{
-          width: 400,
-          height: 400,
-          maxWidth: "100%",
-          aspectRatio: 1,
-          transform: `scale(${zoom})`,
-        }}
-      />
-
-      {/* Let's give some credit */}
-      <p>
-        Powered by <a href="https://cobe.vercel.app/">🌏 Cobe</a>,{" "}
-        <a href="https://www.npmjs.com/package/phenomenon">Phenomenon</a> and{" "}
-        <a href="https://npmjs.com/package/partyserver/">🎈 PartyServer</a>
-      </p>
-
-      {location && weather && (
-        <div className="weather-bar">
-          {location.city && <span>{location.city}&nbsp;</span>}
-          <weather.Icon className="weather-icon" />
-          <span>
-            {weather.temperature.toFixed(1)}°C, {weather.description}
-          </span>
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden />
+          <div>
+            <h1>ionize.club</h1>
+            <p className="tagline">Live globe · markets · orbit</p>
+          </div>
         </div>
-      )}
+        <div className="live-pill" title="People currently connected">
+          <span className="pulse" />
+          <strong>{counter}</strong>
+          <span>{counter === 1 ? "visitor" : "visitors"} online</span>
+        </div>
+      </header>
+
+      <main className="layout">
+        <aside className="rail left-rail">
+          <section className="card clocks-card">
+            <div className="card-head">
+              <h2>World Clocks</h2>
+              <span className="chip">local</span>
+            </div>
+            <div className="clock-list">
+              {clocks.map((c) => (
+                <div className="clock-row" key={c.id}>
+                  <div>
+                    <div className="clock-city">{c.city}</div>
+                    <div className="clock-date">{c.date}</div>
+                  </div>
+                  <div className="clock-time">
+                    <span className="clock-digits">{c.time}</span>
+                    <span className="clock-tz">{c.label}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {status === "loading" && !data ? (
+            <SkeletonCard />
+          ) : data?.weather ? (
+            <section className="card weather-card">
+              <div className="card-head">
+                <h2>{data.weather.city}</h2>
+                <span className="chip">Open-Meteo</span>
+              </div>
+              <div className="weather-main">
+                <div className="weather-temp">
+                  {data.weather.temperature.toFixed(1)}
+                  <span>°C</span>
+                </div>
+                <div className="weather-desc">{data.weather.description}</div>
+              </div>
+              <div className="stat-grid">
+                <div>
+                  <span className="muted">Humidity</span>
+                  <strong>{data.weather.humidity}%</strong>
+                </div>
+                <div>
+                  <span className="muted">Wind</span>
+                  <strong>{data.weather.windSpeed.toFixed(0)} km/h</strong>
+                </div>
+              </div>
+            </section>
+          ) : (
+            <section className="card error-card">
+              <h2>Weather</h2>
+              <p>Unavailable{error ? ` · ${error}` : ""}</p>
+            </section>
+          )}
+
+          {status === "loading" && !data ? (
+            <SkeletonCard />
+          ) : data?.iss ? (
+            <section className="card iss-card">
+              <div className="card-head">
+                <h2>ISS Tracker</h2>
+                <span className="chip glow-chip">live</span>
+              </div>
+              <div className="iss-body">
+                <AltitudeGauge altitudeKm={data.iss.altitude} />
+                <div className="iss-stats">
+                  <div>
+                    <span className="muted">Lat / Lon</span>
+                    <strong>
+                      {data.iss.latitude.toFixed(2)}°, {data.iss.longitude.toFixed(2)}°
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="muted">Velocity</span>
+                    <strong>{(data.iss.velocity / 1000).toFixed(2)} km/s</strong>
+                  </div>
+                  <div>
+                    <span className="muted">Visibility</span>
+                    <strong className="cap">{data.iss.visibility}</strong>
+                  </div>
+                </div>
+              </div>
+              <p className="hint">Orange-cyan pulse marker on the globe</p>
+            </section>
+          ) : (
+            <section className="card error-card">
+              <h2>ISS Tracker</h2>
+              <p>Orbit feed offline</p>
+            </section>
+          )}
+        </aside>
+
+        <section className="stage">
+          <div className="globe-wrap">
+            <canvas
+              ref={canvasRef as LegacyRef<HTMLCanvasElement>}
+              className="globe-canvas"
+              style={{ transform: `scale(${zoom})` }}
+            />
+            <div className="globe-ring" aria-hidden />
+          </div>
+
+          <div className="speed-control card inline-card">
+            <label htmlFor="speedRange">
+              Rotation <b>{rotationSpeed.toFixed(3)}</b>
+            </label>
+            <input
+              id="speedRange"
+              type="range"
+              min="0"
+              max="0.05"
+              step="0.001"
+              value={rotationSpeed}
+              onChange={(e) => setRotationSpeed(parseFloat(e.target.value))}
+            />
+          </div>
+        </section>
+
+        <aside className="rail right-rail">
+          <section className="card markets-card">
+            <div className="card-head">
+              <h2>Markets</h2>
+              <span className="chip">Yahoo · 1D</span>
+            </div>
+            {status === "loading" && !data ? (
+              <div className="market-list">
+                <SkeletonCard />
+                <SkeletonCard />
+              </div>
+            ) : data?.markets?.length ? (
+              <div className="market-list">
+                {data.markets.map((m) => {
+                  const up = m.change == null ? null : m.change >= 0;
+                  return (
+                    <article
+                      key={m.yahoo}
+                      className={`market-item ${
+                        up == null ? "" : up ? "up" : "down"
+                      }`}
+                    >
+                      <div className="market-top">
+                        <div>
+                          <div className="market-symbol">{m.symbol}</div>
+                          <div className="market-name">{m.name}</div>
+                        </div>
+                        <div className="market-price">
+                          <strong>{formatPrice(m.price, m.currency)}</strong>
+                          <span className={`delta ${up ? "up" : "down"}`}>
+                            {formatSigned(m.changePct, 2)}%
+                          </span>
+                        </div>
+                      </div>
+                      <Sparkline values={m.sparkline} positive={up} />
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="empty">Market data unavailable</p>
+            )}
+            {data?.updatedAt && (
+              <p className="hint">
+                Updated{" "}
+                {new Intl.DateTimeFormat("en-GB", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  second: "2-digit",
+                  hour12: false,
+                  timeZone: "Asia/Singapore",
+                }).format(new Date(data.updatedAt))}{" "}
+                SGT
+              </p>
+            )}
+          </section>
+        </aside>
+      </main>
+
+      <footer className="footer">
+        <span>
+          Powered by <a href="https://cobe.vercel.app/">Cobe</a>,{" "}
+          <a href="https://npmjs.com/package/partyserver/">PartyServer</a>, Open-Meteo,
+          WhereTheISS.at & Yahoo Finance
+        </span>
+      </footer>
     </div>
   );
 }
 
-// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
 createRoot(document.getElementById("root")!).render(<App />);
