@@ -3,17 +3,257 @@ import { routePartykitRequest, Server } from "partyserver";
 import type { OutgoingMessage, Position } from "../shared";
 import type { Connection, ConnectionContext } from "partyserver";
 
-// This is the state that we'll store on each connection
 type ConnectionState = {
   position: Position;
 };
 
+type MarketQuote = {
+  symbol: string;
+  yahoo: string;
+  name: string;
+  price: number | null;
+  previousClose: number | null;
+  change: number | null;
+  changePct: number | null;
+  currency: string;
+  sparkline: number[];
+};
+
+type IssData = {
+  latitude: number;
+  longitude: number;
+  altitude: number;
+  velocity: number;
+  visibility: string;
+};
+
+type WeatherData = {
+  city: string;
+  temperature: number;
+  humidity: number;
+  windSpeed: number;
+  weatherCode: number;
+  description: string;
+};
+
+type DashboardPayload = {
+  updatedAt: string;
+  iss: IssData | null;
+  markets: MarketQuote[];
+  weather: WeatherData | null;
+  errors: string[];
+};
+
+const CACHE_TTL_MS = 45_000;
+
+const MARKET_DEFS = [
+  { symbol: "S&P 500", yahoo: "^GSPC", name: "S&P 500" },
+  { symbol: "NASDAQ", yahoo: "^IXIC", name: "NASDAQ" },
+  { symbol: "HSI", yahoo: "^HSI", name: "Hang Seng" },
+  { symbol: "SSE", yahoo: "000001.SS", name: "Shanghai Comp." },
+] as const;
+
+const WEATHER_CODES: Record<number, string> = {
+  0: "Clear",
+  1: "Mainly clear",
+  2: "Partly cloudy",
+  3: "Overcast",
+  45: "Fog",
+  48: "Fog",
+  51: "Drizzle",
+  53: "Drizzle",
+  55: "Drizzle",
+  61: "Rain",
+  63: "Rain",
+  65: "Rain",
+  71: "Snow",
+  80: "Showers",
+  81: "Showers",
+  95: "Thunderstorm",
+};
+
+let dashboardCache: { at: number; data: DashboardPayload } | null = null;
+let dashboardInflight: Promise<DashboardPayload> | null = null;
+
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "ionize.club-dashboard/1.0",
+      ...(init?.headers || {}),
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`${url} → ${res.status}`);
+  }
+  return (await res.json()) as T;
+}
+
+async function fetchIss(): Promise<IssData> {
+  const data = await fetchJson<{
+    latitude: number;
+    longitude: number;
+    altitude: number;
+    velocity: number;
+    visibility: string;
+  }>("https://api.wheretheiss.at/v1/satellites/25544");
+  return {
+    latitude: data.latitude,
+    longitude: data.longitude,
+    altitude: data.altitude,
+    velocity: data.velocity,
+    visibility: data.visibility,
+  };
+}
+
+async function fetchMarket(def: (typeof MARKET_DEFS)[number]): Promise<MarketQuote> {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+    def.yahoo,
+  )}?interval=1d&range=1mo`;
+  const data = await fetchJson<{
+    chart: {
+      result?: Array<{
+        meta: {
+          regularMarketPrice?: number;
+          chartPreviousClose?: number;
+          previousClose?: number;
+          currency?: string;
+        };
+        indicators: { quote: Array<{ close: Array<number | null> }> };
+      }>;
+      error?: unknown;
+    };
+  }>(url);
+
+  const result = data.chart.result?.[0];
+  if (!result) {
+    throw new Error(`No chart for ${def.yahoo}`);
+  }
+
+  const closes = (result.indicators.quote[0]?.close || []).filter(
+    (v): v is number => typeof v === "number" && Number.isFinite(v),
+  );
+  const price = result.meta.regularMarketPrice ?? closes.at(-1) ?? null;
+  const previousClose =
+    result.meta.chartPreviousClose ??
+    result.meta.previousClose ??
+    (closes.length > 1 ? closes[closes.length - 2] : null);
+  const change =
+    price != null && previousClose != null ? price - previousClose : null;
+  const changePct =
+    change != null && previousClose ? (change / previousClose) * 100 : null;
+
+  // Keep last ~24 points for a clean sparkline
+  const sparkline = closes.slice(-24);
+
+  return {
+    symbol: def.symbol,
+    yahoo: def.yahoo,
+    name: def.name,
+    price,
+    previousClose,
+    change,
+    changePct,
+    currency: result.meta.currency || "USD",
+    sparkline,
+  };
+}
+
+async function fetchSingaporeWeather(): Promise<WeatherData> {
+  const data = await fetchJson<{
+    current: {
+      temperature_2m: number;
+      relative_humidity_2m: number;
+      wind_speed_10m: number;
+      weather_code: number;
+    };
+  }>(
+    "https://api.open-meteo.com/v1/forecast?latitude=1.3521&longitude=103.8198&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code&timezone=Asia%2FSingapore",
+  );
+  const code = data.current.weather_code;
+  return {
+    city: "Singapore",
+    temperature: data.current.temperature_2m,
+    humidity: data.current.relative_humidity_2m,
+    windSpeed: data.current.wind_speed_10m,
+    weatherCode: code,
+    description: WEATHER_CODES[code] || "Unknown",
+  };
+}
+
+async function buildDashboard(): Promise<DashboardPayload> {
+  const errors: string[] = [];
+  const [issSettled, weatherSettled, ...marketSettled] = await Promise.all([
+    fetchIss().then(
+      (v) => ({ ok: true as const, v }),
+      (e) => ({ ok: false as const, e }),
+    ),
+    fetchSingaporeWeather().then(
+      (v) => ({ ok: true as const, v }),
+      (e) => ({ ok: false as const, e }),
+    ),
+    ...MARKET_DEFS.map((def) =>
+      fetchMarket(def).then(
+        (v) => ({ ok: true as const, v }),
+        (e) => ({ ok: false as const, e, def }),
+      ),
+    ),
+  ]);
+
+  const markets: MarketQuote[] = [];
+  for (const item of marketSettled) {
+    if (item.ok) markets.push(item.v);
+    else {
+      errors.push(`market:${"def" in item ? item.def.symbol : "?"} failed`);
+      console.warn("market fetch failed", item.e);
+    }
+  }
+
+  if (!issSettled.ok) {
+    errors.push("iss failed");
+    console.warn("iss fetch failed", issSettled.e);
+  }
+  if (!weatherSettled.ok) {
+    errors.push("weather failed");
+    console.warn("weather fetch failed", weatherSettled.e);
+  }
+
+  return {
+    updatedAt: new Date().toISOString(),
+    iss: issSettled.ok ? issSettled.v : null,
+    markets,
+    weather: weatherSettled.ok ? weatherSettled.v : null,
+    errors,
+  };
+}
+
+async function getDashboard(): Promise<DashboardPayload> {
+  const now = Date.now();
+  if (dashboardCache && now - dashboardCache.at < CACHE_TTL_MS) {
+    return dashboardCache.data;
+  }
+  if (dashboardInflight) return dashboardInflight;
+
+  dashboardInflight = buildDashboard()
+    .then((data) => {
+      dashboardCache = { at: Date.now(), data };
+      return data;
+    })
+    .finally(() => {
+      dashboardInflight = null;
+    });
+
+  try {
+    return await dashboardInflight;
+  } catch (e) {
+    if (dashboardCache) return dashboardCache.data;
+    throw e;
+  }
+}
+
 export class Globe extends Server {
   onConnect(conn: Connection<ConnectionState>, ctx: ConnectionContext) {
-    // Whenever a fresh connection is made, we'll
-    // send the entire state to the new connection
-
-    // First, let's extract the position from the Cloudflare headers
     const latitude = ctx.request.cf?.latitude as string | undefined;
     const longitude = ctx.request.cf?.longitude as string | undefined;
     if (!latitude || !longitude) {
@@ -25,23 +265,17 @@ export class Globe extends Server {
       lng: parseFloat(longitude),
       id: conn.id,
     };
-    // And save this on the connection's state
-    conn.setState({
-      position,
-    });
+    conn.setState({ position });
 
-    // Now, let's send the entire state to the new connection
     for (const connection of this.getConnections<ConnectionState>()) {
       try {
         conn.send(
           JSON.stringify({
             type: "add-marker",
-            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
             position: connection.state!.position,
           } satisfies OutgoingMessage),
         );
 
-        // And let's send the new connection's position to all other connections
         if (connection.id !== conn.id) {
           connection.send(
             JSON.stringify({
@@ -56,8 +290,6 @@ export class Globe extends Server {
     }
   }
 
-  // Whenever a connection closes (or errors), we'll broadcast a message to all
-  // other connections to remove the marker.
   onCloseOrError(connection: Connection) {
     this.broadcast(
       JSON.stringify({
@@ -80,6 +312,7 @@ export class Globe extends Server {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
     if (request.method === "GET" && url.pathname === "/api/location") {
       const cf = request.cf as Record<string, string | undefined>;
       return Response.json({
@@ -88,6 +321,30 @@ export default {
         longitude: cf?.longitude ?? "",
       });
     }
+
+    if (request.method === "GET" && url.pathname === "/api/dashboard") {
+      try {
+        const data = await getDashboard();
+        return Response.json(data, {
+          headers: {
+            "Cache-Control": "public, max-age=30",
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      } catch (e) {
+        return Response.json(
+          {
+            updatedAt: new Date().toISOString(),
+            iss: null,
+            markets: [],
+            weather: null,
+            errors: [String(e)],
+          },
+          { status: 502 },
+        );
+      }
+    }
+
     return (
       (await routePartykitRequest(request, { ...env })) ||
       new Response("Not Found", { status: 404 })
