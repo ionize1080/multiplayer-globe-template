@@ -651,7 +651,14 @@ function App() {
                 </button>
               </div>
               {cloudStatus ? (
-                <p className="cloud-status" title={cloudDate || undefined}>
+                <p
+                  className={
+                    cloudStatus.includes("回退") || cloudStatus.includes("不可用")
+                      ? "cloud-status is-error"
+                      : "cloud-status"
+                  }
+                  title={cloudDate || undefined}
+                >
                   {cloudStatus}
                 </p>
               ) : null}
@@ -722,7 +729,7 @@ function App() {
         <span>
           Powered by <a href="https://threejs.org/">three.js</a>,{" "}
           <a href="https://npmjs.com/package/partyserver/">PartyServer</a>, Celestrak TLE,
-          Open-Meteo, WhereTheISS.at & Yahoo Finance · Earth: NASA Blue Marble · clouds: animated webgl-earth / near-realtime NASA GIBS MODIS
+          Open-Meteo, WhereTheISS.at & Yahoo Finance · Earth: NASA Blue Marble · clouds: animated webgl-earth / near-realtime NASA GIBS true-color → cloud mask
         </span>
       </footer>
     </div>

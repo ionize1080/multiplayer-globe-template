@@ -335,41 +335,123 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const a = Math.min(1, Math.max(0, amount));
     const on = a > 0.02 && (cloudsReady || !!cloudMat.map);
     clouds.visible = on;
-    // Second decorative layer only in animated mode (misaligned for live mosaic)
-    clouds2.visible = on && cloudMode === "animated";
+    // Animated wisps: full in animated mode; light fill in live mode for no-data / night gaps
+    clouds2.visible = on;
     cloudShadow.visible = on;
     cloudMat.opacity = 0.12 + a * 0.58; // 0.12..0.70 (R3: less veil over city lights)
-    cloudMat2.opacity = 0.04 + a * 0.32; // 0.04..0.36
-    cloudShadowMat.opacity = a * 0.32;
+    cloudMat2.opacity =
+      cloudMode === "live"
+        ? 0.03 + a * 0.14 // soft fill so bald hemispheres aren't empty
+        : 0.04 + a * 0.32; // 0.04..0.36
+    cloudShadowMat.opacity = a * (cloudMode === "live" ? 0.22 : 0.32);
   }
 
-  /** Convert NASA COT scientific colormap PNG → white clouds with preserved alpha. */
-  async function cotToWhiteCloudTexture(url: string): Promise<THREE.CanvasTexture> {
+  /**
+   * NASA true-color mosaic → white clouds + transparent clear sky.
+   * Rejects empty / colorbar / near-blank maps (P0 coverage gate).
+   */
+  async function trueColorToCloudMask(url: string): Promise<THREE.CanvasTexture> {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`live cloud texture → ${res.status}`);
     const blob = await res.blob();
+    if (!blob.type.includes("png") && blob.size < 50_000) {
+      throw new Error("live cloud texture empty/non-png");
+    }
     const bmp = await createImageBitmap(blob);
+    const w = bmp.width;
+    const h = bmp.height;
     const c = document.createElement("canvas");
-    c.width = bmp.width;
-    c.height = bmp.height;
+    c.width = w;
+    c.height = h;
     const ctx = c.getContext("2d", { willReadFrequently: true })!;
     ctx.drawImage(bmp, 0, 0);
     bmp.close();
-    const id = ctx.getImageData(0, 0, c.width, c.height);
+    const id = ctx.getImageData(0, 0, w, h);
     const d = id.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const a = d[i + 3]!;
-      if (a < 10) {
+    const colCov = new Float32Array(w);
+    let opaqueN = 0;
+    let nodataN = 0;
+    const total = w * h;
+
+    for (let i = 0, px = 0; i < d.length; i += 4, px++) {
+      const r = d[i]!;
+      const g = d[i + 1]!;
+      const b = d[i + 2]!;
+      const aIn = d[i + 3]!;
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      const mx = Math.max(r, g, b);
+      const mn = Math.min(r, g, b);
+      const sat = mx > 1 ? (mx - mn) / mx : 0;
+      const x = px % w;
+
+      // Missing swath / night gap in daytime mosaic
+      const nodata = aIn < 8 || lum < 8;
+      if (nodata) {
+        nodataN++;
         d[i] = d[i + 1] = d[i + 2] = 0;
         d[i + 3] = 0;
-      } else {
-        d[i] = d[i + 1] = d[i + 2] = 255;
-        // Mild boost so thin optical-thickness reads as visible haze
-        d[i + 3] = Math.min(255, Math.round(a * 1.08));
+        continue;
+      }
+
+      // Warm bright desert sand → suppress; ice/cloud stay
+      const warm = r - b > 28 && r > 135;
+      let score = Math.min(1, Math.max(0, (lum - 95) / 90)) * Math.min(1, Math.max(0, 1.15 - sat * 2.1));
+      if (warm) score *= 0.22;
+      // Mild lift so thin cirrus reads
+      score = Math.min(1, score * 1.12);
+      const alpha = score < 0.06 ? 0 : Math.round(score * 255);
+      d[i] = d[i + 1] = d[i + 2] = 255;
+      d[i + 3] = alpha;
+      if (alpha > 20) {
+        opaqueN++;
+        colCov[x]! += 1;
       }
     }
+
+    const coverage = opaqueN / total;
+    const nodataRatio = nodataN / total;
+    if (coverage < 0.08) {
+      throw new Error(`live cloud coverage too low (${(coverage * 100).toFixed(1)}%)`);
+    }
+    if (coverage > 0.92) {
+      throw new Error(`live cloud coverage implausible (${(coverage * 100).toFixed(1)}%)`);
+    }
+    if (nodataRatio > 0.55) {
+      throw new Error(`live cloud mosaic too incomplete (nodata ${(nodataRatio * 100).toFixed(0)}%)`);
+    }
+
+    // Feather hard vertical mosaic / swath edges (Aura P0)
+    for (let x = 0; x < w; x++) colCov[x]! /= h;
+    const edgeW = new Float32Array(w);
+    edgeW.fill(1);
+    for (let x = 1; x < w - 1; x++) {
+      const jump = Math.abs(colCov[x]! - colCov[x - 1]!) + Math.abs(colCov[x]! - colCov[x + 1]!);
+      if (jump > 0.12) {
+        for (let k = Math.max(0, x - 14); k <= Math.min(w - 1, x + 14); k++) {
+          const dist = Math.abs(k - x) / 14;
+          edgeW[k] = Math.min(edgeW[k]!, 0.12 + 0.88 * dist);
+        }
+      }
+    }
+    // Also fade into nodata: soft multiply already-zero stays zero
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) << 2;
+        d[i + 3] = Math.round(d[i + 3]! * edgeW[x]!);
+      }
+    }
+
     ctx.putImageData(id, 0, 0);
-    const tex = new THREE.CanvasTexture(c);
+
+    // Soften speckles / hard seams (P1) via GPU canvas blur
+    const soft = document.createElement("canvas");
+    soft.width = w;
+    soft.height = h;
+    const sctx = soft.getContext("2d")!;
+    sctx.filter = "blur(1.1px)";
+    sctx.drawImage(c, 0, 0);
+
+    const tex = new THREE.CanvasTexture(soft);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 8;
     tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
@@ -393,7 +475,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
     const token = ++liveLoadToken;
     try {
-      const tex = await cotToWhiteCloudTexture(source.url);
+      const tex = await trueColorToCloudMask(source.url);
       if (token !== liveLoadToken) {
         tex.dispose();
         return { ok: false, error: "stale" };
@@ -402,7 +484,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       liveCloudTex = tex;
       cloudMode = "live";
       cloudDrift = 0;
-      cloudDrift2 = 0;
+      // Keep a whisper of wispy drift for no-data fill (Aura P0)
+      cloudDrift2 = cloudDrift2Base * 0.45;
       // Align equirectangular mosaic with Blue Marble (no decorative drift offset)
       clouds.rotation.y = 0;
       clouds.rotation.z = 0;

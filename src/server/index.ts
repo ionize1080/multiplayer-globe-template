@@ -349,8 +349,12 @@ async function getDashboard(): Promise<DashboardPayload> {
 const CLOUD_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const CLOUD_WIDTH = 2048;
 const CLOUD_HEIGHT = 1024;
-const CLOUD_LAYER = "MODIS_Terra_Cloud_Optical_Thickness";
-const CLOUD_MIN_BYTES = 200_000;
+/** True-color mosaics → client extracts white cloud alpha (COT false-color was empty/striped). */
+const CLOUD_LAYERS = [
+  "MODIS_Terra_CorrectedReflectance_TrueColor",
+  "VIIRS_SNPP_CorrectedReflectance_TrueColor",
+] as const;
+const CLOUD_MIN_BYTES = 400_000;
 
 type CloudMetaPayload = {
   ok: true;
@@ -378,10 +382,10 @@ function utcYmd(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-function cloudSnapshotUrl(date: string): string {
+function cloudSnapshotUrl(layer: string, date: string): string {
   const params = new URLSearchParams({
     REQUEST: "GetSnapshot",
-    LAYERS: CLOUD_LAYER,
+    LAYERS: layer,
     CRS: "EPSG:4326",
     TIME: date,
     WRAP: "DAY",
@@ -389,7 +393,7 @@ function cloudSnapshotUrl(date: string): string {
     FORMAT: "image/png",
     WIDTH: String(CLOUD_WIDTH),
     HEIGHT: String(CLOUD_HEIGHT),
-    AUTOSCALE: "FALSE",
+    AUTOSCALE: "TRUE",
   });
   return `https://wvs.earthdata.nasa.gov/api/v1/snapshot?${params}`;
 }
@@ -398,53 +402,69 @@ async function fetchBestCloudMosaic(): Promise<CloudCacheEntry> {
   const now = new Date();
   const errors: string[] = [];
 
-  for (let back = 0; back <= 3; back++) {
+  // Prefer yesterday first: "today" UTC true-color is often half-black (orbit not finished).
+  const dayOffsets = [1, 0, 2, 3];
+
+  for (const back of dayOffsets) {
     const day = new Date(
       Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - back),
     );
     const date = utcYmd(day);
-    try {
-      const res = await fetch(cloudSnapshotUrl(date), {
-        headers: {
-          Accept: "image/png",
-          "User-Agent": "ionize.club-clouds/1.0",
-        },
-      });
-      if (!res.ok) {
-        errors.push(`${date}: HTTP ${res.status}`);
-        continue;
+    for (const layer of CLOUD_LAYERS) {
+      try {
+        const res = await fetch(cloudSnapshotUrl(layer, date), {
+          headers: {
+            Accept: "image/png",
+            "User-Agent": "ionize.club-clouds/1.0",
+          },
+        });
+        if (!res.ok) {
+          errors.push(`${date}/${layer}: HTTP ${res.status}`);
+          continue;
+        }
+        const present = res.headers.get("data-present");
+        const bytes = await res.arrayBuffer();
+        if (bytes.byteLength < CLOUD_MIN_BYTES) {
+          errors.push(`${date}/${layer}: too small (${bytes.byteLength} B)`);
+          continue;
+        }
+        if (present === "false") {
+          errors.push(`${date}/${layer}: data-present=false`);
+          continue;
+        }
+        // True-color mosaics are ~0.8–2MB; reject tiny/error HTML mistaken as PNG
+        const head = new Uint8Array(bytes, 0, Math.min(8, bytes.byteLength));
+        const isPng =
+          head.length >= 8 &&
+          head[0] === 0x89 &&
+          head[1] === 0x50 &&
+          head[2] === 0x4e &&
+          head[3] === 0x47;
+        if (!isPng) {
+          errors.push(`${date}/${layer}: not PNG`);
+          continue;
+        }
+        const meta: CloudMetaPayload = {
+          ok: true,
+          date,
+          layer,
+          source: "NASA GIBS via Worldview Snapshots",
+          texturePath: "/api/clouds/texture",
+          width: CLOUD_WIDTH,
+          height: CLOUD_HEIGHT,
+          refreshedAt: new Date().toISOString(),
+          lagNote:
+            "Daytime corrected reflectance (Terra/VIIRS); client extracts white cloud mask. Typically hours–1 day behind; night side incomplete.",
+        };
+        return {
+          at: Date.now(),
+          meta,
+          bytes,
+          contentType: res.headers.get("content-type") || "image/png",
+        };
+      } catch (e) {
+        errors.push(`${date}/${layer}: ${String(e)}`);
       }
-      const present = res.headers.get("data-present");
-      const bytes = await res.arrayBuffer();
-      // Incomplete / empty day products are tiny PNGs
-      if (bytes.byteLength < CLOUD_MIN_BYTES) {
-        errors.push(`${date}: too small (${bytes.byteLength} B)`);
-        continue;
-      }
-      if (present === "false") {
-        errors.push(`${date}: data-present=false`);
-        continue;
-      }
-      const meta: CloudMetaPayload = {
-        ok: true,
-        date,
-        layer: CLOUD_LAYER,
-        source: "NASA GIBS via Worldview Snapshots",
-        texturePath: "/api/clouds/texture",
-        width: CLOUD_WIDTH,
-        height: CLOUD_HEIGHT,
-        refreshedAt: new Date().toISOString(),
-        lagNote:
-          "Daytime MODIS Terra cloud optical thickness; typically hours–1 day behind. Night-side coverage is incomplete.",
-      };
-      return {
-        at: Date.now(),
-        meta,
-        bytes,
-        contentType: res.headers.get("content-type") || "image/png",
-      };
-    } catch (e) {
-      errors.push(`${date}: ${String(e)}`);
     }
   }
 
