@@ -46,23 +46,37 @@ type GlobeThreeOptions = {
 export type StarlinkTlePair = [string, string];
 
 /** Survives React remounts / StrictMode — Alan fx5 ~10s snap-back */
-export type GlobeViewPose = { theta: number; phi: number };
+export type GlobeViewPose = { theta: number; phi: number; camYaw?: number };
 const VIEW_POSE_KEY = "ionize-view-pose";
 const VIEW_PHI_DEFAULT = 0.18;
+/** Camera orbit distance (Aura R3); yaw frames sun on right limb without faking sunDir */
+const CAM_DIST = 3.05;
+
+function clampPhi(phi: number) {
+  return Math.min(0.95, Math.max(-0.85, phi));
+}
 
 function readStoredViewPose(): GlobeViewPose {
   try {
     const raw = sessionStorage.getItem(VIEW_POSE_KEY);
     if (!raw) return { theta: 0, phi: VIEW_PHI_DEFAULT };
     const p = JSON.parse(raw) as Partial<GlobeViewPose>;
-    return {
+    const pose: GlobeViewPose = {
       theta: Number.isFinite(p.theta) ? (p.theta as number) : 0,
-      phi: Number.isFinite(p.phi)
-        ? Math.min(0.95, Math.max(-0.85, p.phi as number))
-        : VIEW_PHI_DEFAULT,
+      phi: Number.isFinite(p.phi) ? clampPhi(p.phi as number) : VIEW_PHI_DEFAULT,
     };
+    if (Number.isFinite(p.camYaw)) pose.camYaw = p.camYaw as number;
+    return pose;
   } catch {
     return { theta: 0, phi: VIEW_PHI_DEFAULT };
+  }
+}
+
+function hasStoredViewPose(): boolean {
+  try {
+    return sessionStorage.getItem(VIEW_POSE_KEY) != null;
+  } catch {
+    return false;
   }
 }
 
@@ -72,8 +86,12 @@ export function getMemViewPose(): GlobeViewPose {
   return { ...memViewPose };
 }
 
-function persistViewPose(theta: number, phi: number) {
-  memViewPose = { theta, phi };
+function persistViewPose(theta: number, phi: number, camYaw?: number) {
+  memViewPose = {
+    theta,
+    phi,
+    camYaw: camYaw !== undefined ? camYaw : memViewPose.camYaw,
+  };
   try {
     sessionStorage.setItem(VIEW_POSE_KEY, JSON.stringify(memViewPose));
   } catch {
@@ -92,7 +110,7 @@ const CLOUD_TEX_FALLBACK =
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
 export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 /** ISS far-side dim + visitor ripple markers */
-export const GLOBE_FX_BUILD = "fx6-20261028-view-persist";
+export const GLOBE_FX_BUILD = "fx7-20261028-sun-depth";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -241,7 +259,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   // R3 crop fix: z 2.65→3.05 + y→0 so haze/orbit clear frustum; FOV stays 44
   // (Aura's 38–40 FOV would tighten the cone — Alan: pull back instead)
   const camera = new THREE.PerspectiveCamera(44, 1, 0.1, 100);
-  camera.position.set(0, 0, 3.05);
+  camera.position.set(0, 0, CAM_DIST);
 
   // Pivot: Earth rotates under a *world-fixed* sun (terminator stays real)
   const root = new THREE.Group();
@@ -1426,7 +1444,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       color: 0xfde68a,
       transparent: true,
       opacity: 0.95,
-      depthTest: false,
+      depthTest: true, // occlude when sun is behind Earth (fx7 pierce fix)
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     }),
@@ -1441,7 +1459,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       color: 0xfbbf24,
       transparent: true,
       opacity: 0.35,
-      depthTest: false,
+      depthTest: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     }),
@@ -1461,7 +1479,27 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   // Restore pose from module/session — remount must not snap to default
   let viewTheta = memViewPose.theta;
   let viewPhi = memViewPose.phi;
+  // Camera yaw orbits around Y so world-fixed sun can sit on the RIGHT limb.
+  // viewTheta only spins Earth under the sun — it cannot move the glyph on screen.
+  let camYaw = typeof memViewPose.camYaw === "number" ? memViewPose.camYaw : 0;
+  let sunFramed = typeof memViewPose.camYaw === "number" || hasStoredViewPose();
   let lastPosePersist = 0;
+  const camAlong = new THREE.Vector3();
+
+  function applyCameraYaw() {
+    camera.position.set(CAM_DIST * Math.sin(camYaw), 0, CAM_DIST * Math.cos(camYaw));
+    camera.lookAt(0, 0, 0);
+  }
+  applyCameraYaw();
+
+  /** Place sun glyph near the right limb (half-lit disk) without biasing sunDir. */
+  function frameSunToRightLimb() {
+    // yaw = sunAzimuth - π/2 → liveSun projects to +X (screen right) at the limb
+    camYaw = Math.atan2(liveSun.x, liveSun.z) - Math.PI / 2;
+    applyCameraYaw();
+    sunFramed = true;
+    persistViewPose(viewTheta, viewPhi, camYaw);
+  }
   const DRAG_PHI_MIN = -0.85;
   const DRAG_PHI_MAX = 0.95;
   const DRAG_SENS = 0.0032;
@@ -1606,9 +1644,21 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
     const now = new Date();
     updateSun(now);
-    // Sun glyph sits just outside Earth limb along fixed sun direction
-    sunSprite.position.copy(liveSun).multiplyScalar(1.28);
-    sunBeam.position.copy(liveSun).multiplyScalar(1.22);
+    if (!sunFramed) frameSunToRightLimb();
+    applyCameraYaw();
+    // Facing fade: hide glyph when sun is behind Earth from camera (Alan P0)
+    camAlong.copy(camera.position).normalize();
+    const sunFacing = liveSun.dot(camAlong);
+    const sunFade = THREE.MathUtils.smoothstep(sunFacing, -0.02, 0.12);
+    // Slightly push glyph outside atmosphere near the limb (Aura)
+    const limbOut =
+      0.07 * (1 - THREE.MathUtils.smoothstep(Math.abs(sunFacing), 0.0, 0.35));
+    const sunR = 1.28 + limbOut;
+    const beamR = 1.22 + limbOut * 0.85;
+    sunSprite.position.copy(liveSun).multiplyScalar(sunR);
+    sunBeam.position.copy(liveSun).multiplyScalar(beamR);
+    (sunSprite.material as THREE.SpriteMaterial).opacity = 0.95 * sunFade;
+    (sunBeam.material as THREE.SpriteMaterial).opacity = 0.35 * sunFade;
     const sunPulse = 0.5 + 0.5 * Math.sin(time * 0.002);
     sunSprite.scale.setScalar(0.2 + 0.04 * sunPulse);
     sunBeam.scale.setScalar(0.38 + 0.06 * sunPulse);
@@ -1706,7 +1756,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     phi = viewTheta;
     if (time - lastPosePersist > 250) {
       lastPosePersist = time;
-      persistViewPose(viewTheta, viewPhi);
+      persistViewPose(viewTheta, viewPhi, camYaw);
     }
 
     root.updateMatrixWorld(true);
@@ -1722,7 +1772,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   return {
     destroy() {
-      persistViewPose(viewTheta, viewPhi);
+      persistViewPose(viewTheta, viewPhi, camYaw);
       running = false;
       cancelAnimationFrame(raf);
       liveLoadToken += 1;
