@@ -78,11 +78,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   scene.add(root);
 
   // Lights
-  scene.add(new THREE.AmbientLight(0x8ecaff, 0.55));
-  const key = new THREE.DirectionalLight(0xffffff, 1.35);
+  scene.add(new THREE.AmbientLight(0xa5d8ff, 0.78));
+  const key = new THREE.DirectionalLight(0xffffff, 1.6);
   key.position.set(4, 2, 3);
   scene.add(key);
-  const rim = new THREE.DirectionalLight(0x38bdf8, 0.55);
+  const rim = new THREE.DirectionalLight(0x7dd3fc, 0.7);
   rim.position.set(-3, -1, -2);
   scene.add(rim);
 
@@ -94,11 +94,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   const earthGeo = new THREE.SphereGeometry(1, 96, 96);
   const earthMat = new THREE.MeshStandardMaterial({
-    color: 0x0b1224,
-    roughness: 0.85,
-    metalness: 0.15,
-    emissive: 0x071018,
-    emissiveIntensity: 0.4,
+    color: 0x122038,
+    roughness: 0.72,
+    metalness: 0.12,
+    emissive: 0x0c1a2e,
+    emissiveIntensity: 0.55,
   });
   const earth = new THREE.Mesh(earthGeo, earthMat);
   earthGroup.add(earth);
@@ -112,8 +112,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       earthMat.map = tex;
       earthMat.color.set(0xffffff);
       earthMat.emissiveMap = tex;
-      earthMat.emissive.set(0x335577);
-      earthMat.emissiveIntensity = 0.85;
+      earthMat.emissive.set(0x6b8fb3);
+      earthMat.emissiveIntensity = 1.2;
       earthMat.needsUpdate = true;
     },
     undefined,
