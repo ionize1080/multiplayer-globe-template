@@ -49,7 +49,7 @@ export type StarlinkTlePair = [string, string];
 
 /** Survives React remounts / StrictMode — Alan fx5 ~10s snap-back */
 export type GlobeViewPose = { theta: number; phi: number; camYaw?: number; framed?: boolean };
-const VIEW_POSE_KEY = "ionize-view-pose";
+const VIEW_POSE_KEY = "ionize-view-pose-fx20"; // fx17: drop Americas-locked theta=0 sessions
 const VIEW_PHI_DEFAULT = 0.18;
 /** Camera orbit distance (Aura R3); yaw frames sun on right limb without faking sunDir */
 const CAM_DIST = 3.05;
@@ -69,12 +69,10 @@ function readStoredViewPose(): GlobeViewPose {
     };
     if (Number.isFinite(p.camYaw)) pose.camYaw = p.camYaw as number;
     if (p.framed === true) pose.framed = true;
-    // fx9 FAIL: framed + camYaw≈0 means "skip forever" at default night crescent — drop yaw/framed
+    // fx16: yaw=0 may be valid — only drop framed if camYaw missing/non-finite
     if (
       pose.framed === true &&
-      (pose.camYaw === undefined ||
-        !Number.isFinite(pose.camYaw) ||
-        Math.abs(pose.camYaw as number) < 1e-6)
+      (pose.camYaw === undefined || !Number.isFinite(pose.camYaw as number))
     ) {
       delete pose.camYaw;
       delete pose.framed;
@@ -116,19 +114,16 @@ function persistViewPose(
   globeId: number,
 ) {
   if (globeId !== activeGlobeId) return;
-  // Never persist a "framed" zero yaw — that stuck fx8/fx9 at the night crescent
-  const yawOk =
-    camYaw !== undefined && Number.isFinite(camYaw) && Math.abs(camYaw) >= 1e-6;
+  // fx16: yaw=0 is a valid half-lit solve — persist any finite camYaw
+  const yawOk = camYaw !== undefined && Number.isFinite(camYaw);
   const nextYaw = yawOk ? camYaw : memViewPose.camYaw;
   const nextFramed = yawOk
     ? true
-    : memViewPose.framed === true &&
-      typeof memViewPose.camYaw === "number" &&
-      Math.abs(memViewPose.camYaw) >= 1e-6;
+    : memViewPose.framed === true && typeof memViewPose.camYaw === "number";
   memViewPose = {
     theta,
     phi,
-    ...(typeof nextYaw === "number" && Math.abs(nextYaw) >= 1e-6
+    ...(typeof nextYaw === "number" && Number.isFinite(nextYaw)
       ? { camYaw: nextYaw }
       : {}),
     ...(nextFramed ? { framed: true as const } : {}),
@@ -151,7 +146,7 @@ const CLOUD_TEX_FALLBACK =
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
 export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 /** ISS far-side dim + visitor ripple markers */
-export const GLOBE_FX_BUILD = "fx10-20261028-force-frame";
+export const GLOBE_FX_BUILD = "fx20-20261028-sunward";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -185,6 +180,31 @@ function sunDirModel(date: Date, out = new THREE.Vector3()) {
   const y = cosd * Math.sin(alpha - gmst);
   const z = Math.sin(delta);
   return out.set(x, z, -y).normalize();
+}
+
+/** Subsolar longitude (rad, -π..π) from globe-axis sun vector (x=lon0, z=-lon90). */
+function sunLongitudeRad(sun: THREE.Vector3): number {
+  return Math.atan2(-sun.z, sun.x);
+}
+
+/**
+ * viewTheta so geographic longitude `lon` (rad) sits at disk center for camYaw.
+ * At yaw=0, lon=-π/2 (Americas) → theta=0 — the old hardcoded default.
+ */
+function thetaForCenterLon(lon: number, camYaw: number): number {
+  return Math.atan2(-Math.cos(camYaw), Math.sin(camYaw)) - lon;
+}
+
+/**
+ * fx18: default / 自转 reset — sunward continents in the day half.
+ * fx17 centered the western terminator (sub − π/2). When the sun is over
+ * Africa that meridian is ~Americas, so seed ≈ theta=0 and day land sits on
+ * the right limb (reads as night crescent). Bias ~60° toward the subsolar
+ * point so day land/ocean fills center-right; terminator stays left-of-center.
+ */
+function thetaForHalfLitDay(sun: THREE.Vector3, camYaw: number): number {
+  // fx20: put subsolar longitude at disk center (matches drag-Africa half-lit look).
+  return thetaForCenterLon(sunLongitudeRad(sun), camYaw);
 }
 
 function makeGlowSprite(size = 128) {
@@ -353,10 +373,10 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const dayNightUniforms = {
     uNightMap: { value: null as THREE.Texture | null },
     uSunDir: { value: sunDir.clone() },
-    uDayBoost: { value: 1.55 },
+    uDayBoost: { value: 1.85 },
     uNightFloor: { value: 0.28 },
     uCityBoost: { value: 2.8 },
-    uTermSoft: { value: 0.32 },
+    uTermSoft: { value: 0.16 },
   };
 
   earthMat.onBeforeCompile = (shader) => {
@@ -366,6 +386,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     shader.uniforms.uNightFloor = dayNightUniforms.uNightFloor;
     shader.uniforms.uCityBoost = dayNightUniforms.uCityBoost;
     shader.uniforms.uTermSoft = dayNightUniforms.uTermSoft;
+    // Keep a handle so the animate loop can force-sync uSunDir (r186 uniform copy pitfalls)
+    (earthMat as THREE.Material & { userData: Record<string, unknown> }).userData.dnShader = shader;
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
@@ -376,7 +398,10 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       .replace(
         "#include <begin_vertex>",
         `#include <begin_vertex>
-        vDnNormal = normalize(mat3(modelMatrix) * objectNormal);
+        // Unit sphere at origin, rotation-only: world position == world normal.
+        // Equivalent to normalize(mat3(modelMatrix)*objectNormal) while scale is uniform;
+        // if Earth ever translates or non-uniform-scales, switch back to mat3*normal.
+        vDnNormal = normalize((modelMatrix * vec4(transformed, 1.0)).xyz);
         vDnUv = uv;`,
       );
     shader.fragmentShader = shader.fragmentShader
@@ -396,22 +421,30 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         "#include <map_fragment>",
         `#include <map_fragment>
         float ndl = dot(normalize(vDnNormal), normalize(uSunDir));
-        float dayF = smoothstep(-uTermSoft, uTermSoft * 1.2, ndl);
-        // Warm, slightly saturated day (Google Earth–like)
+        // fx12: tighter terminator so geometric half-lit reads as ~half on screen
+        float dayF = smoothstep(-uTermSoft, uTermSoft, ndl);
         vec3 dayCol = diffuseColor.rgb * uDayBoost;
         dayCol = mix(dayCol, dayCol * vec3(1.08, 1.02, 0.92), 0.35);
         dayCol = mix(vec3(dot(dayCol, vec3(0.299, 0.587, 0.114))), dayCol, 1.18);
+        // fx14: day oceans were reading as night next to city lights — lift hard
+        dayCol = dayCol * 1.22 + vec3(0.03, 0.05, 0.09);
+        dayCol = max(dayCol, vec3(0.10, 0.16, 0.28));
         vec3 nightTex = texture2D(uNightMap, vDnUv).rgb;
-        // City lights dominate night; soft blue floor so it never goes dead black
-        vec3 cities = nightTex * nightTex * uCityBoost; // square to punch bright pixels
-        vec3 nightCol = cities + vec3(0.035, 0.05, 0.1) * uNightFloor;
-        nightCol = max(nightCol, vec3(uNightFloor * 0.4));
+        vec3 cities = nightTex * nightTex * uCityBoost;
+        vec3 nightCol = cities + vec3(0.02, 0.03, 0.06) * uNightFloor;
+        nightCol = max(nightCol, vec3(uNightFloor * 0.25));
         diffuseColor.rgb = mix(nightCol, dayCol, dayF);
-        // Dusk city bleed near terminator
-        diffuseColor.rgb += cities * 0.35 * (1.0 - dayF) * dayF * 4.0;`,
+        diffuseColor.rgb += cities * 0.25 * (1.0 - dayF) * dayF * 4.0;`,
+      )
+      .replace(
+        "#include <opaque_fragment>",
+        `// fx16: day/night mix is final look — MeshStandard lights were crushing the day
+        // half so facing=0 still read as a night crescent next to city lights.
+        outgoingLight = diffuseColor.rgb;
+        #include <opaque_fragment>`,
       );
   };
-  earthMat.customProgramCacheKey = () => "earth-day-night-r2";
+  earthMat.customProgramCacheKey = () => "earth-day-night-r5-nolight";
 
   const earth = new THREE.Mesh(earthGeo, earthMat);
   earthMat.depthWrite = true;
@@ -1536,30 +1569,44 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   activeGlobeId = globeId;
   let viewTheta = memViewPose.theta;
   let viewPhi = memViewPose.phi;
+  // fx17: seed day-side theta unless restoring a real user pose.
+  // Old ionize-view-pose often had theta≈0 (Americas night) — treat |theta|<1e-3 as unseeded (fx17+/fx18 pose key).
+  // Drag→rotate always re-seeds. Deliberate drag poses (|theta|≥1e-3) restore as-is.
+  const restoredUserPose =
+    hasStoredViewPose() && Math.abs(memViewPose.theta) >= 1e-3;
+  let spinPoseSeeded = restoredUserPose;
   // Camera yaw orbits around Y so world-fixed sun can sit on the RIGHT limb.
   // viewTheta only spins Earth under the sun — it cannot move the glyph on screen.
   let camYaw =
-    typeof memViewPose.camYaw === "number" && Math.abs(memViewPose.camYaw) >= 1e-6
+    typeof memViewPose.camYaw === "number" && Number.isFinite(memViewPose.camYaw)
       ? memViewPose.camYaw
       : 0;
-  // Require framed + non-zero yaw. fx9 FAIL: framed&&camYaw≈0 skipped solver forever.
   let sunFramed =
     memViewPose.framed === true &&
     typeof memViewPose.camYaw === "number" &&
-    Number.isFinite(memViewPose.camYaw) &&
-    Math.abs(memViewPose.camYaw) >= 1e-6;
+    Number.isFinite(memViewPose.camYaw);
   let lastPosePersist = 0;
   let frameAttempts = 0;
   let facingStableCount = 0;
+  let lastSunLog = 0;
   const camAlong = new THREE.Vector3();
-  /** Target sun·cam for ~50% lit (lit≈0.5+0.5*f). Aura ~50/50; range 0.05–0.18. */
-  const TARGET_FACING = 0.08;
-  const FACING_TOL = 0.15;
+  /**
+   * Target sun·cam. Geometric lit≈0.5+0.5*f (f=sun·cam). Soft term uTermSoft≈0.16.
+   * fx11–14 raised TARGET to 0.22→0.48 to fight "day ocean reads as night"; that was a
+   * dayCol misread. fx14 day-read lift fixed the crescent; facing=0.48 then looked ~85% day.
+   * fx15: TARGET 0 → litApprox≈0.50 half-disk; keep dayCol lift; sun-right via solve preference.
+   */
+  // fx20: Aura fx19 still ~25–30% day; drag-Africa ~50% proves lighting OK — seed too far
+  // from sun. Raise facing + put subsolar near disk center (DAY_LAND_BIAS≈π/2).
+  const TARGET_FACING = 0.32; // litApprox≈0.66; soft |facing−target|≤FACING_TOL + sunRight>0
+  const FACING_TOL = 0.12;
   const MAX_FRAME_ATTEMPTS = 120;
 
   function applyCameraYaw() {
     camera.position.set(CAM_DIST * Math.sin(camYaw), 0, CAM_DIST * Math.cos(camYaw));
+    camera.up.set(0, 1, 0);
     camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld(true);
   }
   applyCameraYaw();
 
@@ -1573,20 +1620,15 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   }
 
   /**
-   * Solve camYaw for targetFacing with sun on screen RIGHT.
-   * Three.js Matrix4.lookAt: z=eye−target, right=cross(up,z)=(cz,0,−cx)
-   * → sunRight = sx·cz − sz·cx (NOT −sx·cz+sz·cx). Keep this so sun is screen-right.
-   * Do not trust sunFramed alone — RAF re-measures facing every frame until stable.
+   * Pure solve: camYaw for targetFacing with sun on screen RIGHT.
+   * Three.js Matrix4.lookAt: right=(cz,0,−cx) → sunRight = sx·cz − sz·cx.
    */
-  function frameSunToRightLimb() {
-    const sx = liveSun.x;
-    const sz = liveSun.z;
+  function solveCamYawForSun(sx: number, sz: number, targetFacing: number): number {
     const r = Math.hypot(sx, sz) || 1e-6;
-    const F = THREE.MathUtils.clamp(TARGET_FACING, -0.9, 0.9);
+    const F = THREE.MathUtils.clamp(targetFacing, -0.9, 0.9);
     const cosA = THREE.MathUtils.clamp(F / r, -1, 1);
     const alpha = Math.acos(cosA);
     const az = Math.atan2(sx, sz);
-    // Two yaws give same |facing|; pick sun on camera +X (screen right)
     const candidates = [az - alpha, az + alpha];
     let best = candidates[0];
     let bestScore = -Infinity;
@@ -1594,7 +1636,6 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       const cx = Math.sin(yaw);
       const cz = Math.cos(yaw);
       const facingXZ = sx * cx + sz * cz;
-      // Three.js lookAt right = (cz, 0, −cx); sun on +X when sunRight > 0
       const sunRight = sx * cz - sz * cx;
       const score = (sunRight > 0 ? 10 : -10) + facingXZ;
       if (score > bestScore) {
@@ -1602,20 +1643,64 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         best = yaw;
       }
     }
+    return best;
+  }
+
+  function publishSunDebug(facing: number) {
+    const cx = Math.sin(camYaw);
+    const cz = Math.cos(camYaw);
+    const sunRight = liveSun.x * cz - liveSun.z * cx;
+    const yaw0WouldShowSunOnRight = liveSun.x > 0; // at camYaw=0, +X is screen-right
+    const payload = {
+      facing,
+      targetFacing: TARGET_FACING,
+      camYaw,
+      litApprox: 0.5 + 0.5 * facing,
+      sunRight,
+      yaw0WouldShowSunOnRight,
+      framed: sunFramed,
+      cam: [camera.position.x, camera.position.y, camera.position.z],
+      sun: [liveSun.x, liveSun.y, liveSun.z],
+      build: GLOBE_FX_BUILD,
+    };
+    try {
+      (window as unknown as { __ionizeSun?: typeof payload }).__ionizeSun = payload;
+      canvas.dataset.ionizeFacing = facing.toFixed(3);
+      canvas.dataset.ionizeYaw = camYaw.toFixed(3);
+      canvas.dataset.ionizeSunRight = sunRight.toFixed(3);
+    } catch {
+      /* ignore */
+    }
+    const now = performance.now();
+    if (now - lastSunLog > 2000) {
+      lastSunLog = now;
+      console.info("[ionize-sun]", payload);
+      if (sunRight > 0 && facing < 0) {
+        console.warn("[ionize-sun] glyph-on-right but facing<0 — yaw0 false-positive risk");
+      }
+    }
+  }
+
+  /**
+   * fx11: lock yaw from liveSun every call — do not trust sunFramed / attempt caps.
+   * fx9–fx10 still showed camYaw≈0 crescent despite solvers in the bundle.
+   */
+  function frameSunToRightLimb() {
+    const sx = liveSun.x;
+    const sz = liveSun.z;
+    let best = solveCamYawForSun(sx, sz, TARGET_FACING);
     camYaw = best;
     applyCameraYaw();
     let facing = measureFacing();
 
-    // Verify / binary-search nudge if residual > 0.08 (should be rare — cam on equator)
-    if (Math.abs(facing - TARGET_FACING) > 0.08) {
+    if (Math.abs(facing - TARGET_FACING) > 0.05) {
       let lo = best - 0.75;
       let hi = best + 0.75;
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < 10; i++) {
         const mid = 0.5 * (lo + hi);
         camYaw = mid;
         applyCameraYaw();
         facing = measureFacing();
-        // Sign: d(facing)/d(yaw) = sx*cos(yaw) - sz*sin(yaw)
         const dF = sx * Math.cos(mid) - sz * Math.sin(mid);
         if ((facing < TARGET_FACING && dF > 0) || (facing > TARGET_FACING && dF < 0)) {
           lo = mid;
@@ -1628,49 +1713,23 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       facing = measureFacing();
     }
 
-    const ok = facingIsOk(facing) && Math.abs(camYaw) >= 1e-6;
+    // fx16 (Kevin): yaw=0 can be the correct half-lit solve when sun is along +X.
+    // Do NOT coerce with `|| 0.55` (0 is falsy) or ban |camYaw|<1e-3.
+    const cx = Math.sin(camYaw);
+    const cz = Math.cos(camYaw);
+    const sunRight = sx * cz - sz * cx;
+    const ok = facingIsOk(facing) && sunRight > 0;
     sunFramed = ok;
     if (ok) facingStableCount += 1;
     else facingStableCount = 0;
-    // info (not debug) so Alan sees it without Verbose filter
-    console.info("[ionize-sun]", {
-      facing,
-      targetFacing: TARGET_FACING,
-      camYaw,
-      litApprox: 0.5 + 0.5 * facing,
-      framed: sunFramed,
-      attempt: frameAttempts,
-      stable: facingStableCount,
-    });
-    // Persist yaw/framed only when facing is actually on target
+    frameAttempts += 1;
+    publishSunDebug(facing);
     if (ok) persistViewPose(viewTheta, viewPhi, camYaw, globeId);
     return facing;
   }
 
-  /** Re-frame until measured facing matches TARGET (boolean alone lied in fx9). */
+  /** Always re-solve from liveSun (rotate + drag). Yaw only — never touches theta/phi. */
   function ensureSunFramed() {
-    applyCameraYaw();
-    let facing = measureFacing();
-    const badYaw = !Number.isFinite(camYaw) || Math.abs(camYaw) < 1e-6;
-    // Drag owns theta/phi — never re-frame for facing drift (looks like E3 snap).
-    // Still allow a one-shot solve if camYaw is stuck at 0 / unframed.
-    if (interactionMode === "drag") {
-      if ((!sunFramed || badYaw) && frameAttempts < MAX_FRAME_ATTEMPTS) {
-        frameAttempts += 1;
-        return frameSunToRightLimb();
-      }
-      return facing;
-    }
-    const need = !sunFramed || badYaw || !facingIsOk(facing);
-    if (!need) {
-      facingStableCount = Math.min(facingStableCount + 1, 8);
-      sunFramed = true;
-      return facing;
-    }
-    if (frameAttempts >= MAX_FRAME_ATTEMPTS) {
-      return facing;
-    }
-    frameAttempts += 1;
     return frameSunToRightLimb();
   }
   const DRAG_PHI_MIN = -0.85;
@@ -1694,13 +1753,16 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       // Re-frame sun on RIGHT limb from live sunDir; clear skewed drag tilt.
       if (prev === "drag") {
         dragPointerId = null;
-        viewTheta = 0;
         viewPhi = ROTATE_PHI;
         sunFramed = false;
         frameAttempts = 0;
         facingStableCount = 0;
-        frameSunToRightLimb(); // camYaw from liveSun; persists pose
+        // Yaw first, then day-side theta (fx17) — not Americas-locked 0.
+        frameSunToRightLimb();
+        viewTheta = thetaForHalfLitDay(liveSun, camYaw);
+        spinPoseSeeded = true;
         applyCameraYaw();
+        persistViewPose(viewTheta, viewPhi, camYaw, globeId);
       }
     }
   }
@@ -1736,7 +1798,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     persistViewPose(
       viewTheta,
       viewPhi,
-      sunFramed && Math.abs(camYaw) >= 1e-6 ? camYaw : undefined,
+      sunFramed ? camYaw : undefined,
       globeId,
     );
     lastPosePersist = performance.now();
@@ -1835,8 +1897,20 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
     const now = new Date();
     updateSun(now);
-    // Force re-measure every frame until facing≈TARGET (fx9 trusted boolean → stuck camYaw=0)
+    // fx12: force shader uSunDir to the same vector measureFacing uses
+    const dnShader = (earthMat as THREE.Material & { userData: Record<string, unknown> }).userData
+      .dnShader as { uniforms?: { uSunDir?: { value: THREE.Vector3 } } } | undefined;
+    if (dnShader?.uniforms?.uSunDir?.value) {
+      dnShader.uniforms.uSunDir.value.copy(liveSun);
+    }
+    dayNightUniforms.uSunDir.value.copy(liveSun);
     ensureSunFramed();
+    if (!spinPoseSeeded && interactionMode === "rotate") {
+      viewTheta = thetaForHalfLitDay(liveSun, camYaw);
+      viewPhi = ROTATE_PHI;
+      spinPoseSeeded = true;
+      persistViewPose(viewTheta, viewPhi, camYaw, globeId);
+    }
     applyCameraYaw();
     // Day brightness slider → shader uDayBoost (does not fake sunDir)
     const dayBright = Math.min(2.4, Math.max(0.8, opts.getDayBrightness?.() ?? 1.55));
@@ -1970,7 +2044,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       persistViewPose(
         viewTheta,
         viewPhi,
-        sunFramed && Math.abs(camYaw) >= 1e-6 ? camYaw : undefined,
+        sunFramed ? camYaw : undefined,
         globeId,
       );
     }
@@ -1982,6 +2056,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     atmosUniforms.uPulse.value = pulse;
     (hazeMat.uniforms.uPulse as { value: number }).value = pulse;
 
+    // fx11: last mutation before paint — yaw must stick (Aura fx10 still looked camYaw≈0)
+    applyCameraYaw();
     renderer.render(scene, camera);
   }
   raf = requestAnimationFrame(frame);
@@ -1990,7 +2066,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     persistViewPose(
       viewTheta,
       viewPhi,
-      sunFramed && Math.abs(camYaw) >= 1e-6 ? camYaw : undefined,
+      sunFramed ? camYaw : undefined,
       globeId,
     );
     running = false;

@@ -387,7 +387,7 @@ function App() {
   const [starlinkDrawn, setStarlinkDrawn] = useState(0);
 
   // Day-hemisphere brightness (shader uDayBoost) — user t104u
-  const [dayBrightness, setDayBrightness] = useState(1.55);
+  const [dayBrightness, setDayBrightness] = useState(1.85);
   const dayBrightnessRef = useRef(dayBrightness);
   useEffect(() => {
     dayBrightnessRef.current = dayBrightness;
