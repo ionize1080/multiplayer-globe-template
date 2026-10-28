@@ -8,6 +8,7 @@ import type { LegacyRef } from "react";
 import type { OutgoingMessage } from "../shared";
 import {
   createGlobeThree,
+  LIVE_CLOUDS_BUILD,
   type CloudMode,
   type IssSnapshot,
   type LatLngMarker,
@@ -394,7 +395,7 @@ function App() {
     let timer: ReturnType<typeof setInterval> | undefined;
 
     async function applyLive() {
-      setCloudStatus("加载近实时云图…");
+      setCloudStatus(`加载近实时云图… · ${LIVE_CLOUDS_BUILD}`);
       try {
         const res = await fetch("/api/clouds");
         const meta = (await res.json()) as CloudMetaPayload | { ok: false; error?: string };
@@ -410,13 +411,15 @@ function App() {
           date: meta.date,
         });
         if (cancelled) return;
+        // Superseded load (StrictMode / rapid toggle) — keep UI on live, newer run wins
+        if (!result.ok && result.error === "stale") return;
         if (!result.ok) throw new Error(result.error || "setCloudSource failed");
         setCloudDate(meta.date);
         setCloudStatus(`近实时 · ${meta.date} UTC · ${LIVE_CLOUDS_BUILD}`);
       } catch (e) {
         if (cancelled) return;
         console.warn("live clouds failed", e);
-        setCloudStatus("近实时不可用，已回退动画云图");
+        setCloudStatus(`近实时不可用，已回退动画云图 · ${LIVE_CLOUDS_BUILD}`);
         setCloudDate(null);
         await globe!.setCloudSource({ mode: "animated" });
         setCloudMode("animated");
@@ -638,14 +641,21 @@ function App() {
                 <button
                   type="button"
                   className={cloudMode === "animated" ? "seg active" : "seg"}
-                  onClick={() => setCloudMode("animated")}
+                  onClick={() => {
+                    setCloudMode("animated");
+                    setCloudStatus("");
+                    setCloudDate(null);
+                  }}
                 >
                   动画云图
                 </button>
                 <button
                   type="button"
                   className={cloudMode === "live" ? "seg active" : "seg"}
-                  onClick={() => setCloudMode("live")}
+                  onClick={() => {
+                    setCloudMode("live");
+                    setCloudStatus(`加载近实时云图… · ${LIVE_CLOUDS_BUILD}`);
+                  }}
                 >
                   近实时云图
                 </button>
