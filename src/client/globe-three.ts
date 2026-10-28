@@ -449,27 +449,31 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const orbitPositions = new Float32Array(ORBIT_SAMPLES * 3);
   const orbitGeo = new THREE.BufferGeometry();
   orbitGeo.setAttribute("position", new THREE.BufferAttribute(orbitPositions, 3));
-  const orbitLine = new THREE.LineLoop(
-    orbitGeo,
-    new THREE.LineBasicMaterial({
-      color: 0x22d3ee,
-      transparent: true,
-      opacity: 0.85,
-    }),
-  );
+  const orbitMat = new THREE.LineBasicMaterial({
+    color: 0x22d3ee,
+    transparent: true,
+    opacity: 0.95,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const orbitLine = new THREE.LineLoop(orbitGeo, orbitMat);
+  orbitLine.renderOrder = 10;
+  orbitLine.frustumCulled = false;
   earthGroup.add(orbitLine);
 
   const orbitGlowPositions = new Float32Array(ORBIT_SAMPLES * 3);
   const orbitGlowGeo = new THREE.BufferGeometry();
   orbitGlowGeo.setAttribute("position", new THREE.BufferAttribute(orbitGlowPositions, 3));
-  const orbitGlow = new THREE.LineLoop(
-    orbitGlowGeo,
-    new THREE.LineBasicMaterial({
-      color: 0xf97316,
-      transparent: true,
-      opacity: 0.28,
-    }),
-  );
+  const orbitGlowMat = new THREE.LineBasicMaterial({
+    color: 0xf97316,
+    transparent: true,
+    opacity: 0.4,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const orbitGlow = new THREE.LineLoop(orbitGlowGeo, orbitGlowMat);
+  orbitGlow.renderOrder = 9;
+  orbitGlow.frustumCulled = false;
   earthGroup.add(orbitGlow);
 
   const iss = createIssModel();
@@ -493,6 +497,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   let satrec: satellite.SatRec | null = null;
   let lastTleKey = "";
   let lastOrbitBuild = 0;
+  let orbitReady = false;
   let lastIssEmit = 0;
   const tmp = new THREE.Vector3();
   const tmp2 = new THREE.Vector3();
@@ -602,6 +607,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     (orbitGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     (orbitGlowGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     orbitGeo.computeBoundingSphere();
+    orbitGlowGeo.computeBoundingSphere();
+    orbitReady = firstSet;
   }
 
   function updateSun(_date: Date) {
@@ -650,12 +657,20 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const now = new Date();
     updateSun(now);
 
-    const p = propagate(now);
-    if (p) {
-      if (time - lastOrbitBuild > 20_000 || lastOrbitBuild === 0) {
+    // Orbit rebuild whenever TLE is available (not gated on current prop success)
+    if (ensureSatrec() && (time - lastOrbitBuild > 20_000 || lastOrbitBuild === 0)) {
+      try {
         rebuildOrbit(now);
         lastOrbitBuild = time;
+      } catch (err) {
+        console.warn("rebuildOrbit failed", err);
       }
+    }
+    orbitLine.visible = orbitReady;
+    orbitGlow.visible = orbitReady;
+
+    const p = propagate(now);
+    if (p) {
       latLngAltToVec3(p.latitude, p.longitude, p.altitude, iss.position);
       issGlow.position.copy(iss.position);
 
@@ -680,13 +695,9 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       }
       iss.visible = true;
       issGlow.visible = true;
-      orbitLine.visible = true;
-      orbitGlow.visible = true;
     } else {
       iss.visible = false;
       issGlow.visible = false;
-      orbitLine.visible = false;
-      orbitGlow.visible = false;
       if (time - lastIssEmit > 2000) {
         lastIssEmit = time;
         opts.onIssUpdate?.(null);

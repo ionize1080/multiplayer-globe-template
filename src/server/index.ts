@@ -59,24 +59,57 @@ let tleCache: { at: number; data: IssTlePayload } | null = null;
 let tleInflight: Promise<IssTlePayload> | null = null;
 
 async function fetchIssTle(): Promise<IssTlePayload> {
-  const url = "https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=tle";
-  const res = await fetch(url, {
-    headers: {
-      Accept: "text/plain",
-      "User-Agent": "ionize.club-dashboard/1.0",
-    },
-  });
-  if (!res.ok) throw new Error(`tle → ${res.status}`);
-  const text = (await res.text()).trim();
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.length < 3) throw new Error("tle parse failed");
-  return {
-    name: lines[0],
-    line1: lines[1],
-    line2: lines[2],
-    fetchedAt: new Date().toISOString(),
-    source: "celestrak",
-  };
+  const errors: string[] = [];
+
+  // 1) WhereTheISS JSON TLE (most reliable from Workers)
+  try {
+    const data = await fetchJson<{
+      name?: string;
+      header?: string;
+      line1: string;
+      line2: string;
+    }>("https://api.wheretheiss.at/v1/satellites/25544/tles");
+    if (data.line1 && data.line2) {
+      return {
+        name: data.header || data.name || "ISS (ZARYA)",
+        line1: data.line1.trim(),
+        line2: data.line2.trim(),
+        fetchedAt: new Date().toISOString(),
+        source: "wheretheiss",
+      };
+    }
+    errors.push("wheretheiss: missing lines");
+  } catch (e) {
+    errors.push(`wheretheiss: ${String(e)}`);
+  }
+
+  // 2) Celestrak GP
+  try {
+    const url = "https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=tle";
+    const res = await fetch(url, {
+      headers: {
+        Accept: "text/plain",
+        "User-Agent": "ionize.club-dashboard/1.0",
+      },
+    });
+    if (!res.ok) throw new Error(`tle → ${res.status}`);
+    const text = (await res.text()).trim();
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length < 3) throw new Error("tle parse failed");
+    // Celestrak may return name + 2 lines, or just 2 lines
+    const hasName = !lines[0]!.startsWith("1 ");
+    return {
+      name: hasName ? lines[0]! : "ISS (ZARYA)",
+      line1: hasName ? lines[1]! : lines[0]!,
+      line2: hasName ? lines[2]! : lines[1]!,
+      fetchedAt: new Date().toISOString(),
+      source: "celestrak",
+    };
+  } catch (e) {
+    errors.push(`celestrak: ${String(e)}`);
+  }
+
+  throw new Error(`tle failed: ${errors.join("; ")}`);
 }
 
 async function getIssTle(): Promise<IssTlePayload> {
