@@ -1,0 +1,30 @@
+{
+  "compatibility_date": "2025-04-01",
+  "main": "src/server/index.ts",
+  "name": "multiplayer-globe-template-preview",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["Globe"],
+      "tag": "v1"
+    }
+  ],
+  "assets": {
+    "directory": "public"
+  },
+  "build": {
+    "command": "npx esbuild src/client/index.tsx --bundle --outdir=public/dist --format=esm --minify --target=es2022"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "Globe",
+        "name": "Globe"
+      }
+    ]
+  },
+  "observability": {
+    "enabled": true
+  },
+  "workers_dev": true,
+  "preview_urls": true
+}

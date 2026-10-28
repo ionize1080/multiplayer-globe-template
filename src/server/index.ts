@@ -346,6 +346,151 @@ async function getDashboard(): Promise<DashboardPayload> {
   }
 }
 
+const CLOUD_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+const CLOUD_WIDTH = 2048;
+const CLOUD_HEIGHT = 1024;
+/** True-color mosaics → client extracts white cloud alpha (COT false-color was empty/striped). */
+const CLOUD_LAYERS = [
+  "MODIS_Terra_CorrectedReflectance_TrueColor",
+  "VIIRS_SNPP_CorrectedReflectance_TrueColor",
+] as const;
+const CLOUD_MIN_BYTES = 400_000;
+
+type CloudMetaPayload = {
+  ok: true;
+  date: string;
+  layer: string;
+  source: string;
+  texturePath: string;
+  width: number;
+  height: number;
+  refreshedAt: string;
+  lagNote: string;
+};
+
+type CloudCacheEntry = {
+  at: number;
+  meta: CloudMetaPayload;
+  bytes: ArrayBuffer;
+  contentType: string;
+};
+
+let cloudCache: CloudCacheEntry | null = null;
+let cloudInflight: Promise<CloudCacheEntry> | null = null;
+
+function utcYmd(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function cloudSnapshotUrl(layer: string, date: string): string {
+  const params = new URLSearchParams({
+    REQUEST: "GetSnapshot",
+    LAYERS: layer,
+    CRS: "EPSG:4326",
+    TIME: date,
+    WRAP: "DAY",
+    BBOX: "-90,-180,90,180",
+    FORMAT: "image/png",
+    WIDTH: String(CLOUD_WIDTH),
+    HEIGHT: String(CLOUD_HEIGHT),
+    AUTOSCALE: "TRUE",
+  });
+  return `https://wvs.earthdata.nasa.gov/api/v1/snapshot?${params}`;
+}
+
+async function fetchBestCloudMosaic(): Promise<CloudCacheEntry> {
+  const now = new Date();
+  const errors: string[] = [];
+
+  // Prefer yesterday first: "today" UTC true-color is often half-black (orbit not finished).
+  const dayOffsets = [1, 0, 2, 3];
+
+  for (const back of dayOffsets) {
+    const day = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - back),
+    );
+    const date = utcYmd(day);
+    for (const layer of CLOUD_LAYERS) {
+      try {
+        const res = await fetch(cloudSnapshotUrl(layer, date), {
+          headers: {
+            Accept: "image/png",
+            "User-Agent": "ionize.club-clouds/1.0",
+          },
+        });
+        if (!res.ok) {
+          errors.push(`${date}/${layer}: HTTP ${res.status}`);
+          continue;
+        }
+        const present = res.headers.get("data-present");
+        const bytes = await res.arrayBuffer();
+        if (bytes.byteLength < CLOUD_MIN_BYTES) {
+          errors.push(`${date}/${layer}: too small (${bytes.byteLength} B)`);
+          continue;
+        }
+        if (present === "false") {
+          errors.push(`${date}/${layer}: data-present=false`);
+          continue;
+        }
+        // True-color mosaics are ~0.8–2MB; reject tiny/error HTML mistaken as PNG
+        const head = new Uint8Array(bytes, 0, Math.min(8, bytes.byteLength));
+        const isPng =
+          head.length >= 8 &&
+          head[0] === 0x89 &&
+          head[1] === 0x50 &&
+          head[2] === 0x4e &&
+          head[3] === 0x47;
+        if (!isPng) {
+          errors.push(`${date}/${layer}: not PNG`);
+          continue;
+        }
+        const meta: CloudMetaPayload = {
+          ok: true,
+          date,
+          layer,
+          source: "NASA GIBS via Worldview Snapshots",
+          texturePath: "/api/clouds/texture",
+          width: CLOUD_WIDTH,
+          height: CLOUD_HEIGHT,
+          refreshedAt: new Date().toISOString(),
+          lagNote:
+            "Daytime corrected reflectance (Terra/VIIRS); client extracts white cloud mask. Typically hours–1 day behind; night side incomplete.",
+        };
+        return {
+          at: Date.now(),
+          meta,
+          bytes,
+          contentType: res.headers.get("content-type") || "image/png",
+        };
+      } catch (e) {
+        errors.push(`${date}/${layer}: ${String(e)}`);
+      }
+    }
+  }
+
+  throw new Error(`cloud mosaic unavailable: ${errors.join("; ")}`);
+}
+
+async function getCloudMosaic(): Promise<CloudCacheEntry> {
+  const now = Date.now();
+  if (cloudCache && now - cloudCache.at < CLOUD_CACHE_TTL_MS) return cloudCache;
+  if (cloudInflight) return cloudInflight;
+  cloudInflight = fetchBestCloudMosaic()
+    .then((entry) => {
+      cloudCache = entry;
+      return entry;
+    })
+    .finally(() => {
+      cloudInflight = null;
+    });
+  try {
+    return await cloudInflight;
+  } catch (e) {
+    if (cloudCache) return cloudCache;
+    throw e;
+  }
+}
+
 export class Globe extends Server {
   onConnect(conn: Connection<ConnectionState>, ctx: ConnectionContext) {
     const latitude = ctx.request.cf?.latitude as string | undefined;
@@ -455,6 +600,49 @@ export default {
             errors: [String(e)],
           },
           { status: 502 },
+        );
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/clouds") {
+      try {
+        const entry = await getCloudMosaic();
+        return Response.json(entry.meta, {
+          headers: {
+            "Cache-Control": "public, max-age=600",
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      } catch (e) {
+        return Response.json(
+          { ok: false, error: String(e) },
+          {
+            status: 502,
+            headers: { "Access-Control-Allow-Origin": "*" },
+          },
+        );
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/clouds/texture") {
+      try {
+        const entry = await getCloudMosaic();
+        return new Response(entry.bytes, {
+          headers: {
+            "Content-Type": entry.contentType,
+            "Cache-Control": "public, max-age=3600",
+            "Access-Control-Allow-Origin": "*",
+            "X-Cloud-Date": entry.meta.date,
+            "X-Cloud-Layer": entry.meta.layer,
+          },
+        });
+      } catch (e) {
+        return Response.json(
+          { ok: false, error: String(e) },
+          {
+            status: 502,
+            headers: { "Access-Control-Allow-Origin": "*" },
+          },
         );
       }
     }

@@ -17,6 +17,12 @@ export type IssSnapshot = {
   velocity: number;
 };
 
+export type CloudMode = "animated" | "live";
+
+export type CloudSource =
+  | { mode: "animated" }
+  | { mode: "live"; url: string; date?: string };
+
 type GlobeThreeOptions = {
   canvas: HTMLCanvasElement;
   getRotationSpeed: () => number;
@@ -35,6 +41,8 @@ const CLOUD_TEX =
   "https://cdn.jsdelivr.net/gh/turban/webgl-earth@master/images/fair_clouds_4k.png";
 const CLOUD_TEX_FALLBACK =
   "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_clouds_1024.png";
+/** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
+export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -295,31 +303,375 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   cloudShadow.rotation.copy(clouds.rotation);
   earthGroup.add(cloudShadow);
 
-  const cloudDrift = 0.0001 + Math.random() * 0.00006;
-  const cloudDrift2 = -0.00004 - Math.random() * 0.00003;
+  const cloudDriftBase = 0.0001 + Math.random() * 0.00006;
+  const cloudDrift2Base = -0.00004 - Math.random() * 0.00003;
+  let cloudDrift = cloudDriftBase;
+  let cloudDrift2 = cloudDrift2Base;
+  const animatedCloudRotY = clouds.rotation.y;
+  const animatedCloudRotZ = clouds.rotation.z;
 
   let cloudsReady = false;
-  function applyCloudTex(tex: THREE.Texture) {
+  let cloudMode: CloudMode = "animated";
+  let animatedCloudTex: THREE.Texture | null = null;
+  let liveCloudTex: THREE.Texture | null = null;
+  let liveLoadToken = 0;
+
+  function bindCloudTex(tex: THREE.Texture, wrap: THREE.Wrapping = THREE.RepeatWrapping) {
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 8;
-    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.wrapS = tex.wrapT = wrap;
     cloudMat.map = tex;
     cloudMat.alphaMap = tex;
+    // Live: unlit-ish white so TrueColor mask isn't muddy gray under night lighting
+    if (cloudMode === "live") {
+      cloudMat.color.set(0xffffff);
+      cloudMat.emissive.set(0xffffff);
+      cloudMat.emissiveIntensity = 0.9;
+      cloudMat.roughness = 1;
+      cloudMat.metalness = 0;
+    } else {
+      cloudMat.color.set(0xffffff);
+      cloudMat.emissive.set(0x334155);
+      cloudMat.emissiveIntensity = 0.04;
+    }
     cloudMat.needsUpdate = true;
     cloudShadowMat.alphaMap = tex;
     cloudShadowMat.needsUpdate = true;
     cloudsReady = true;
   }
 
+  function applyCloudTex(tex: THREE.Texture) {
+    animatedCloudTex = tex;
+    if (cloudMode === "animated") bindCloudTex(tex, THREE.RepeatWrapping);
+  }
+
   function applyCloudAmount(amount: number) {
     const a = Math.min(1, Math.max(0, amount));
     const on = a > 0.02 && (cloudsReady || !!cloudMat.map);
     clouds.visible = on;
+    // Live: global soft fair_clouds shell so orbital barcodes never read empty
     clouds2.visible = on;
     cloudShadow.visible = on;
-    cloudMat.opacity = 0.12 + a * 0.58; // 0.12..0.70 (R3: less veil over city lights)
-    cloudMat2.opacity = 0.04 + a * 0.32; // 0.04..0.36
-    cloudShadowMat.opacity = a * 0.32;
+    // Live: lighter veil so land stays readable at ~40–55%
+    cloudMat.opacity =
+      cloudMode === "live" ? 0.06 + a * 0.28 : 0.12 + a * 0.58;
+    cloudMat2.opacity =
+      cloudMode === "live"
+        ? 0.22 + a * 0.34 // strong fair_clouds underlay hides barcodes
+        : 0.04 + a * 0.32;
+    cloudShadowMat.opacity = a * (cloudMode === "live" ? 0.08 : 0.32);
+  }
+
+  /** Yield so React can paint / Earth can keep spinning during heavy mask work. */
+  function yieldFrame(): Promise<void> {
+    return new Promise((resolve) => {
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => resolve());
+      } else {
+        setTimeout(resolve, 0);
+      }
+    });
+  }
+
+  /**
+   * NASA true-color → bright WHITE cloud mask (c7).
+   * Higher lum gate + gamma; fill dark vertical barcode bands with white wisps
+   * + narrow neighbor alpha bleed (not ocean smear). Chunked with rAF yields.
+   */
+  async function trueColorToCloudMask(url: string): Promise<THREE.CanvasTexture> {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`live cloud texture → ${res.status}`);
+    const blob = await res.blob();
+    if (!blob.type.includes("png") && blob.size < 50_000) {
+      throw new Error("live cloud texture empty/non-png");
+    }
+    await yieldFrame();
+    const bmp = await createImageBitmap(blob);
+    const w = bmp.width;
+    const h = bmp.height;
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext("2d", { willReadFrequently: true })!;
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+    await yieldFrame();
+    const id = ctx.getImageData(0, 0, w, h);
+    const d = id.data;
+    const isNodata = new Uint8Array(w * h);
+    const colNodata = new Float32Array(w);
+    const colMeanA = new Float32Array(w);
+    const colBright = new Float32Array(w);
+    let opaqueN = 0;
+    let nodataN = 0;
+    const total = w * h;
+    const ROW_CHUNK = 32;
+
+    // Bright-white-only extract: kill mid-gray ocean veil / muddy speckles
+    for (let y0 = 0; y0 < h; y0 += ROW_CHUNK) {
+      const y1 = Math.min(h, y0 + ROW_CHUNK);
+      for (let y = y0; y < y1; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = (y * w + x) << 2;
+          const r = d[i]!;
+          const g = d[i + 1]!;
+          const b = d[i + 2]!;
+          const aIn = d[i + 3]!;
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          const mx = Math.max(r, g, b);
+          const mn = Math.min(r, g, b);
+          const sat = mx > 1 ? (mx - mn) / mx : 0;
+
+          const nodata = aIn < 8 || lum < 10;
+          if (nodata) {
+            nodataN++;
+            isNodata[y * w + x] = 1;
+            colNodata[x]! += 1;
+            d[i] = d[i + 1] = d[i + 2] = 255;
+            d[i + 3] = 0;
+            continue;
+          }
+
+          // Desert / land warm bright → suppress
+          const warm = r - b > 28 && r > 130 && sat > 0.1;
+          // Only fairly bright, low-sat pixels count as cloud
+          let score =
+            Math.min(1, Math.max(0, (lum - 145) / 75)) *
+            Math.min(1, Math.max(0, 1.35 - sat * 2.4));
+          if (warm) score *= 0.12;
+          // Stronger gamma → punchy white cores, sparse thin haze
+          score = Math.pow(Math.min(1, score), 0.55);
+          const alpha = score < 0.08 ? 0 : Math.round(score * 255);
+          d[i] = d[i + 1] = d[i + 2] = 255;
+          d[i + 3] = alpha;
+          colMeanA[x]! += alpha;
+          if (alpha > 40) {
+            opaqueN++;
+            colBright[x]! += 1;
+          }
+        }
+      }
+      await yieldFrame();
+    }
+
+    const coverage = opaqueN / total;
+    const nodataRatio = nodataN / total;
+    if (coverage < 0.05) {
+      throw new Error(`live cloud coverage too low (${(coverage * 100).toFixed(1)}%)`);
+    }
+    if (coverage > 0.85) {
+      throw new Error(`live cloud coverage implausible (${(coverage * 100).toFixed(1)}%)`);
+    }
+    if (nodataRatio > 0.55) {
+      throw new Error(`live cloud mosaic too incomplete (nodata ${(nodataRatio * 100).toFixed(0)}%)`);
+    }
+
+    for (let x = 0; x < w; x++) {
+      colNodata[x]! /= h;
+      colMeanA[x]! /= h;
+      colBright[x]! /= h;
+    }
+
+    // Gap = elevated nodata OR dark/empty vertical band (low mean alpha vs neighbors)
+    let medianNd = 0;
+    let medianA = 0;
+    {
+      const sn = Array.from(colNodata).sort((a, b) => a - b);
+      const sa = Array.from(colMeanA).sort((a, b) => a - b);
+      medianNd = sn[Math.floor(sn.length / 2)]!;
+      medianA = sa[Math.floor(sa.length / 2)]!;
+    }
+    const gapCol = new Uint8Array(w);
+    for (let x = 0; x < w; x++) {
+      let localMax = 0;
+      for (let k = Math.max(0, x - 40); k <= Math.min(w - 1, x + 40); k++) {
+        localMax = Math.max(localMax, colMeanA[k]!);
+      }
+      const darkStrip =
+        localMax > 35 && colMeanA[x]! < localMax * 0.38 && colMeanA[x]! < medianA * 0.85;
+      const ndGap = colNodata[x]! >= Math.max(0.14, medianNd + 0.03);
+      if (ndGap || darkStrip) gapCol[x] = 1;
+    }
+    // Dilate gap marks 4px so narrow barcodes are fully covered
+    {
+      const copy = gapCol.slice();
+      for (let x = 0; x < w; x++) {
+        if (!copy[x]) continue;
+        for (let k = Math.max(0, x - 4); k <= Math.min(w - 1, x + 4); k++) gapCol[k] = 1;
+      }
+    }
+
+    const gapW = new Float32Array(w);
+    const FEATHER = 14;
+    for (let x = 0; x < w; x++) {
+      if (!gapCol[x]) continue;
+      for (let k = Math.max(0, x - FEATHER); k <= Math.min(w - 1, x + FEATHER); k++) {
+        const dist = Math.abs(k - x) / FEATHER;
+        gapW[k] = Math.max(gapW[k]!, 1 - dist);
+      }
+    }
+
+    let wispData: Uint8ClampedArray | null = null;
+    for (const src of [CLOUD_TEX_FALLBACK, CLOUD_TEX]) {
+      try {
+        const wispRes = await fetch(src, { mode: "cors" });
+        if (!wispRes.ok) continue;
+        await yieldFrame();
+        const wispBmp = await createImageBitmap(await wispRes.blob());
+        const wc = document.createElement("canvas");
+        wc.width = w;
+        wc.height = h;
+        const wctx = wc.getContext("2d", { willReadFrequently: true })!;
+        wctx.drawImage(wispBmp, 0, 0, w, h);
+        wispBmp.close();
+        wispData = wctx.getImageData(0, 0, w, h).data;
+        break;
+      } catch {
+        /* next */
+      }
+    }
+    await yieldFrame();
+
+    function wispAlphaAt(i: number): number {
+      if (!wispData) return 140;
+      const wl =
+        0.299 * wispData[i]! + 0.587 * wispData[i + 1]! + 0.114 * wispData[i + 2]!;
+      // Bias wisps toward white (lift floor)
+      return Math.round(Math.min(255, (wl / 255) * 200 + 40));
+    }
+
+    // Snapshot alphas for neighbor bleed (pre-fill)
+    const liveSnap = new Uint8Array(w * h);
+    for (let p = 0; p < liveSnap.length; p++) liveSnap[p] = d[(p << 2) + 3]!;
+
+    for (let y0 = 0; y0 < h; y0 += ROW_CHUNK) {
+      const y1 = Math.min(h, y0 + ROW_CHUNK);
+      for (let y = y0; y < y1; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+          const p = row + x;
+          const i = p << 2;
+          const gw = gapW[x]!;
+          const live = liveSnap[p]!;
+
+          if (!gapCol[x] && !isNodata[p] && gw < 0.08) continue;
+
+          // Narrow neighbor cloud bleed (white alpha only — never ocean RGB)
+          let bleed = 0;
+          const span = 10;
+          let xl = x - 1;
+          while (xl >= 0 && xl >= x - span && (gapCol[xl] || liveSnap[row + xl]! < 30)) xl--;
+          let xr = x + 1;
+          while (xr < w && xr <= x + span && (gapCol[xr] || liveSnap[row + xr]! < 30)) xr++;
+          if (xl >= 0 && xr < w && xl >= x - span && xr <= x + span) {
+            const t = (x - xl) / Math.max(1, xr - xl);
+            bleed = (1 - t) * liveSnap[row + xl]! + t * liveSnap[row + xr]!;
+          } else if (xl >= 0 && xl >= x - span) {
+            bleed = liveSnap[row + xl]! * 0.75;
+          } else if (xr < w && xr <= x + span) {
+            bleed = liveSnap[row + xr]! * 0.75;
+          }
+
+          const wa = wispAlphaAt(i);
+          if (isNodata[p] || gapCol[x]) {
+            // Wisp-dominated fill (not flat gray floor); light bleed only
+            const fill = Math.round(wa * 0.82 + bleed * 0.22);
+            const out = Math.max(live, fill);
+            d[i] = d[i + 1] = d[i + 2] = 255;
+            d[i + 3] = Math.min(190, out);
+            continue;
+          }
+
+          // Soft edge into gap zone
+          if (gw > 0.08 && live > 0) {
+            const mix = gw * 0.4;
+            d[i + 3] = Math.round(live * (1 - mix * 0.25) + wa * mix * 0.45);
+          }
+        }
+      }
+      await yieldFrame();
+    }
+
+    // Soften barcode fill edges only (3px horiz, gap columns) — not ocean smear
+    {
+      const tmp = new Uint8Array(w * h);
+      for (let p = 0; p < tmp.length; p++) tmp[p] = d[(p << 2) + 3]!;
+      for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+          if (gapW[x]! < 0.2) continue;
+          let sum = 0;
+          let n = 0;
+          for (let k = Math.max(0, x - 3); k <= Math.min(w - 1, x + 3); k++) {
+            sum += tmp[row + k]!;
+            n++;
+          }
+          const i = (row + x) << 2;
+          const blended = sum / n;
+          const m = Math.min(1, gapW[x]!);
+          d[i + 3] = Math.round(tmp[row + x]! * (1 - m * 0.65) + blended * (m * 0.65));
+        }
+      }
+    }
+
+    ctx.putImageData(id, 0, 0);
+    await yieldFrame();
+
+    const soft = document.createElement("canvas");
+    soft.width = w;
+    soft.height = h;
+    const sctx = soft.getContext("2d")!;
+    sctx.filter = "blur(1.1px)";
+    sctx.drawImage(c, 0, 0);
+
+    const tex = new THREE.CanvasTexture(soft);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 8;
+    tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.needsUpdate = true;
+    (tex as THREE.Texture & { userData: Record<string, string> }).userData = {
+      liveCloudsBuild: LIVE_CLOUDS_BUILD,
+    };
+    return tex;
+  }
+
+  async function setCloudSource(source: CloudSource): Promise<{ ok: boolean; error?: string }> {
+    if (source.mode === "animated") {
+      liveLoadToken += 1;
+      cloudMode = "animated";
+      cloudDrift = cloudDriftBase;
+      cloudDrift2 = cloudDrift2Base;
+      clouds.rotation.y = animatedCloudRotY;
+      clouds.rotation.z = animatedCloudRotZ;
+      cloudShadow.rotation.copy(clouds.rotation);
+      if (animatedCloudTex) bindCloudTex(animatedCloudTex, THREE.RepeatWrapping);
+      applyCloudAmount(opts.getCloudAmount());
+      return { ok: true };
+    }
+
+    const token = ++liveLoadToken;
+    try {
+      const tex = await trueColorToCloudMask(source.url);
+      if (token !== liveLoadToken) {
+        tex.dispose();
+        return { ok: false, error: "stale" };
+      }
+      if (liveCloudTex) liveCloudTex.dispose();
+      liveCloudTex = tex;
+      cloudMode = "live";
+      cloudDrift = 0;
+      // Keep visible wispy drift so gap fill doesn't look frozen/static
+      cloudDrift2 = cloudDrift2Base * 0.85;
+      // Align equirectangular mosaic with Blue Marble (no decorative drift offset)
+      clouds.rotation.y = 0;
+      clouds.rotation.z = 0;
+      cloudShadow.rotation.set(0, 0, 0);
+      bindCloudTex(tex, THREE.ClampToEdgeWrapping);
+      applyCloudAmount(opts.getCloudAmount());
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
   }
 
   loader.load(
@@ -334,18 +686,24 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     },
   );
 
-  // Second wispy cloud layer for depth
+  // Second wispy cloud layer for depth (animated mode only)
   const cloudMat2 = cloudMat.clone();
   cloudMat2.opacity = 0.35;
   const clouds2 = new THREE.Mesh(new THREE.SphereGeometry(1.022, 64, 64), cloudMat2);
   clouds2.rotation.y = Math.random() * Math.PI * 2;
   earthGroup.add(clouds2);
-  loader.load(CLOUD_TEX_FALLBACK, (tex) => {
+  function bindClouds2(tex: THREE.Texture) {
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
     cloudMat2.map = tex;
     cloudMat2.alphaMap = tex;
+    cloudMat2.color.set(0xffffff);
+    cloudMat2.emissive.set(0xffffff);
+    cloudMat2.emissiveIntensity = 0.35;
     cloudMat2.needsUpdate = true;
+  }
+  loader.load(CLOUD_TEX, bindClouds2, undefined, () => {
+    loader.load(CLOUD_TEX_FALLBACK, bindClouds2);
   });
 
   // Fresnel atmosphere (subtle)
@@ -817,6 +1175,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     destroy() {
       running = false;
       cancelAnimationFrame(raf);
+      liveLoadToken += 1;
       window.removeEventListener("resize", onResize);
       ro?.disconnect();
       orbitGeo.dispose();
@@ -827,11 +1186,13 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       markerMatSelf.dispose();
       markerMatOther.dispose();
       issGlowTex.dispose();
+      liveCloudTex?.dispose();
       cloudMat.dispose();
       cloudMat2.dispose();
       cloudShadowMat.dispose();
       renderer.dispose();
     },
     resize,
+    setCloudSource,
   };
 }
