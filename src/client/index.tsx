@@ -293,7 +293,7 @@ function App() {
           id: message.position.id,
           lat: message.position.lat,
           lng: message.position.lng,
-          size: message.position.id === socket.id ? 0.1 : 0.05,
+          size: message.position.id === socket.id ? 0.04 : 0.022,
           self: message.position.id === socket.id,
         });
         socketIdRef.current = socket.id;

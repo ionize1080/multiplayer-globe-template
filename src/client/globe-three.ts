@@ -124,10 +124,10 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   // Fresnel atmosphere (three.js) — parented to earthGroup so zoom/rotation track Earth
   const atmosUniforms = {
-    uGlowColor: { value: new THREE.Color(0x38bdf8) },
-    uRimColor: { value: new THREE.Color(0x7dd3fc) },
-    uIntensity: { value: 1.15 },
-    uPower: { value: 2.6 },
+    uGlowColor: { value: new THREE.Color(0x1e3a5f) },
+    uRimColor: { value: new THREE.Color(0x38bdf8) },
+    uIntensity: { value: 0.55 },
+    uPower: { value: 3.8 },
     uPulse: { value: 0 },
   };
   const atmosMat = new THREE.ShaderMaterial({
@@ -157,20 +157,20 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       void main() {
         vec3 viewDir = normalize(cameraPosition - vWorldPos);
         float fresnel = pow(1.0 - abs(dot(viewDir, normalize(vNormal))), uPower);
-        fresnel = clamp(fresnel * (uIntensity + uPulse), 0.0, 1.5);
-        vec3 col = mix(uGlowColor, uRimColor, fresnel);
-        float alpha = fresnel * 0.85;
+        fresnel = clamp(fresnel * (uIntensity + uPulse), 0.0, 1.0);
+        vec3 col = mix(uGlowColor, uRimColor, smoothstep(0.0, 1.0, fresnel));
+        float alpha = fresnel * 0.42;
         gl_FragColor = vec4(col, alpha);
       }
     `,
   });
-  const atmos = new THREE.Mesh(new THREE.SphereGeometry(1.045, 80, 80), atmosMat);
+  const atmos = new THREE.Mesh(new THREE.SphereGeometry(1.028, 64, 64), atmosMat);
   earthGroup.add(atmos);
 
   // Soft outer haze shell (also three.js, same group)
   const hazeMat = new THREE.ShaderMaterial({
     uniforms: {
-      uColor: { value: new THREE.Color(0x1d4ed8) },
+      uColor: { value: new THREE.Color(0x172554) },
       uPulse: { value: 0 },
     },
     transparent: true,
@@ -195,12 +195,12 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       void main() {
         vec3 viewDir = normalize(cameraPosition - vWorldPos);
         float fresnel = pow(1.0 - abs(dot(viewDir, normalize(vNormal))), 3.4);
-        float a = fresnel * (0.28 + uPulse);
+        float a = fresnel * (0.12 + uPulse * 0.5);
         gl_FragColor = vec4(uColor, a);
       }
     `,
   });
-  const atmosOuter = new THREE.Mesh(new THREE.SphereGeometry(1.1, 64, 64), hazeMat);
+  const atmosOuter = new THREE.Mesh(new THREE.SphereGeometry(1.055, 48, 48), hazeMat);
   earthGroup.add(atmosOuter);
 
   // Subtle grid / equator ring
@@ -220,18 +220,18 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   earthGroup.add(markerGroup);
   const markerGeo = new THREE.SphereGeometry(1, 12, 12);
   const markerMatSelf = new THREE.MeshStandardMaterial({
-    color: 0xa5f3fc,
+    color: 0xbae6fd,
     emissive: 0x22d3ee,
-    emissiveIntensity: 1.2,
-    roughness: 0.3,
-    metalness: 0.4,
+    emissiveIntensity: 0.45,
+    roughness: 0.45,
+    metalness: 0.25,
   });
   const markerMatOther = new THREE.MeshStandardMaterial({
     color: 0x38bdf8,
     emissive: 0x0284c7,
-    emissiveIntensity: 0.9,
-    roughness: 0.35,
-    metalness: 0.35,
+    emissiveIntensity: 0.28,
+    roughness: 0.5,
+    metalness: 0.2,
   });
   const markerPool: THREE.Mesh[] = [];
 
@@ -250,7 +250,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       }
       mesh.visible = true;
       mesh.material = data.self ? markerMatSelf : markerMatOther;
-      const s = Math.max(0.012, Math.min(0.04, data.size * 0.35));
+      const s = Math.max(0.0045, Math.min(0.012, data.size * 0.09));
       mesh.scale.setScalar(s);
       latLngAltToVec3(data.lat, data.lng, 12, mesh.position);
     }
@@ -459,7 +459,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     root.rotation.x = 0.18;
 
     // gentle atmosphere pulse
-    const pulse = 0.04 * Math.sin(time * 0.001);
+    const pulse = 0.015 * Math.sin(time * 0.001);
     atmosUniforms.uPulse.value = pulse;
     (hazeMat.uniforms.uPulse as { value: number }).value = pulse;
 
