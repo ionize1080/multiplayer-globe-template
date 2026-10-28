@@ -161,6 +161,9 @@ async function fetchIss(): Promise<IssData> {
 }
 
 async function fetchMarket(def: (typeof MARKET_DEFS)[number]): Promise<MarketQuote> {
+  // range=1mo feeds the sparkline only. Yahoo's meta.chartPreviousClose on a
+  // multi-week range is the *first* bar of that range (not prior session), so
+  // day change MUST come from the daily series / regularMarketChangePercent.
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
     def.yahoo,
   )}?interval=1d&range=1mo`;
@@ -171,6 +174,7 @@ async function fetchMarket(def: (typeof MARKET_DEFS)[number]): Promise<MarketQuo
           regularMarketPrice?: number;
           chartPreviousClose?: number;
           previousClose?: number;
+          regularMarketChangePercent?: number;
           currency?: string;
         };
         indicators: { quote: Array<{ close: Array<number | null> }> };
@@ -188,14 +192,17 @@ async function fetchMarket(def: (typeof MARKET_DEFS)[number]): Promise<MarketQuo
     (v): v is number => typeof v === "number" && Number.isFinite(v),
   );
   const price = result.meta.regularMarketPrice ?? closes.at(-1) ?? null;
-  const previousClose =
-    result.meta.chartPreviousClose ??
-    result.meta.previousClose ??
-    (closes.length > 1 ? closes[closes.length - 2] : null);
+  // Prior trading session close = second-to-last daily close (NOT chartPreviousClose).
+  const previousClose = closes.length > 1 ? closes[closes.length - 2] : null;
   const change =
     price != null && previousClose != null ? price - previousClose : null;
   const changePct =
-    change != null && previousClose ? (change / previousClose) * 100 : null;
+    typeof result.meta.regularMarketChangePercent === "number" &&
+    Number.isFinite(result.meta.regularMarketChangePercent)
+      ? result.meta.regularMarketChangePercent
+      : change != null && previousClose
+        ? (change / previousClose) * 100
+        : null;
 
   // Keep last ~24 points for a clean sparkline
   const sparkline = closes.slice(-24);
