@@ -125,8 +125,10 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
 
   const scene = new THREE.Scene();
+  // R3 crop fix: z 2.65→3.05 + y→0 so haze/orbit clear frustum; FOV stays 44
+  // (Aura's 38–40 FOV would tighten the cone — Alan: pull back instead)
   const camera = new THREE.PerspectiveCamera(44, 1, 0.1, 100);
-  camera.position.set(0, 0.12, 2.65);
+  camera.position.set(0, 0, 3.05);
 
   // Pivot: Earth rotates under a *world-fixed* sun (terminator stays real)
   const root = new THREE.Group();
@@ -166,7 +168,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const dayNightUniforms = {
     uNightMap: { value: null as THREE.Texture | null },
     uSunDir: { value: sunDir.clone() },
-    uDayBoost: { value: 1.28 },
+    uDayBoost: { value: 1.38 },
     uNightFloor: { value: 0.28 },
     uCityBoost: { value: 2.8 },
     uTermSoft: { value: 0.32 },
@@ -268,7 +270,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const cloudMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     transparent: true,
-    opacity: 0.72,
+    opacity: 0.58,
     depthWrite: false,
     roughness: 1,
     metalness: 0,
@@ -315,8 +317,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     clouds.visible = on;
     clouds2.visible = on;
     cloudShadow.visible = on;
-    cloudMat.opacity = 0.15 + a * 0.75; // 0.15..0.90
-    cloudMat2.opacity = 0.05 + a * 0.4; // 0.05..0.45
+    cloudMat.opacity = 0.12 + a * 0.58; // 0.12..0.70 (R3: less veil over city lights)
+    cloudMat2.opacity = 0.04 + a * 0.32; // 0.04..0.36
     cloudShadowMat.opacity = a * 0.32;
   }
 
@@ -420,7 +422,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       }
     `,
   });
-  earthGroup.add(new THREE.Mesh(new THREE.SphereGeometry(1.09, 48, 48), hazeMat));
+  earthGroup.add(new THREE.Mesh(new THREE.SphereGeometry(1.055, 48, 48), hazeMat));
 
   // Visitor markers
   const markerGroup = new THREE.Group();
@@ -492,7 +494,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     color: 0x22d3ee,
     transparent: true,
     opacity: 0.95,
-    depthTest: false,
+    depthTest: true,
     depthWrite: false,
   });
   const orbitLine = new THREE.LineLoop(orbitGeo, orbitMat);
@@ -507,7 +509,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     color: 0xf97316,
     transparent: true,
     opacity: 0.4,
-    depthTest: false,
+    depthTest: true,
     depthWrite: false,
   });
   const orbitGlow = new THREE.LineLoop(orbitGlowGeo, orbitGlowMat);
