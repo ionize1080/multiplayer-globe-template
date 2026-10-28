@@ -1,47 +1,46 @@
 import * as THREE from "three";
 
-/** Stylized metallic ISS — truss, modules, solar arrays. Unit-scale ~1 ≈ station length. */
+/** Stylized ISS — subdued materials (no chrome hot spots / Earth-lighting beacon). */
 export function createIssModel(): THREE.Group {
   const root = new THREE.Group();
   root.name = "iss";
 
   const metal = new THREE.MeshStandardMaterial({
-    color: 0xc8d4e8,
-    metalness: 0.92,
-    roughness: 0.28,
-    emissive: 0x1e3a5f,
-    emissiveIntensity: 0.15,
+    color: 0xb8c4d6,
+    metalness: 0.35,
+    roughness: 0.62,
+    emissive: 0x0b1220,
+    emissiveIntensity: 0.04,
   });
   const accent = new THREE.MeshStandardMaterial({
-    color: 0x38bdf8,
-    metalness: 0.7,
-    roughness: 0.35,
-    emissive: 0x0ea5e9,
-    emissiveIntensity: 0.45,
+    color: 0x5b9ec9,
+    metalness: 0.25,
+    roughness: 0.55,
+    emissive: 0x0c4a6e,
+    emissiveIntensity: 0.12,
   });
   const panel = new THREE.MeshStandardMaterial({
-    color: 0x0b1f3a,
-    metalness: 0.55,
-    roughness: 0.4,
-    emissive: 0x0369a1,
-    emissiveIntensity: 0.55,
+    color: 0x0a1628,
+    metalness: 0.2,
+    roughness: 0.7,
+    emissive: 0x082f49,
+    emissiveIntensity: 0.18,
   });
   const panelEdge = new THREE.MeshStandardMaterial({
-    color: 0x7dd3fc,
-    metalness: 0.8,
-    roughness: 0.25,
-    emissive: 0x22d3ee,
-    emissiveIntensity: 0.35,
+    color: 0x4a90b8,
+    metalness: 0.3,
+    roughness: 0.55,
+    emissive: 0x155e75,
+    emissiveIntensity: 0.1,
   });
   const gold = new THREE.MeshStandardMaterial({
-    color: 0xfbbf24,
-    metalness: 0.85,
-    roughness: 0.35,
-    emissive: 0xb45309,
-    emissiveIntensity: 0.2,
+    color: 0xd4a017,
+    metalness: 0.4,
+    roughness: 0.55,
+    emissive: 0x5c3d0a,
+    emissiveIntensity: 0.06,
   });
 
-  // Central truss (along +X)
   const truss = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.08, 0.08), metal);
   root.add(truss);
   for (let i = -1; i <= 1; i += 1) {
@@ -50,7 +49,6 @@ export function createIssModel(): THREE.Group {
     root.add(cross);
   }
 
-  // Destiny / Columbus / Kibo style pressurized modules along +Z/-Z
   const moduleGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.55, 16);
   const m1 = new THREE.Mesh(moduleGeo, metal);
   m1.rotation.z = Math.PI / 2;
@@ -62,23 +60,20 @@ export function createIssModel(): THREE.Group {
   m2.scale.set(0.85, 0.9, 0.85);
   root.add(m2);
 
-  // Node sphere
   const node = new THREE.Mesh(new THREE.SphereGeometry(0.14, 20, 16), metal);
   node.position.set(0.05, 0.02, 0.02);
   root.add(node);
 
-  // Cupola hint
   const cupola = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 0.06, 12), gold);
   cupola.position.set(0.05, -0.14, 0.02);
   root.add(cupola);
 
-  // Radiators (white-ish)
   const radMat = new THREE.MeshStandardMaterial({
-    color: 0xe2e8f0,
-    metalness: 0.4,
-    roughness: 0.55,
-    emissive: 0x94a3b8,
-    emissiveIntensity: 0.08,
+    color: 0xcbd5e1,
+    metalness: 0.15,
+    roughness: 0.75,
+    emissive: 0x334155,
+    emissiveIntensity: 0.03,
   });
   for (const z of [-0.42, 0.42]) {
     const rad = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.02, 0.28), radMat);
@@ -103,11 +98,9 @@ export function createIssModel(): THREE.Group {
       const rim2 = rim.clone();
       rim2.position.z = -0.275;
       wing.add(rim2);
-      // cell lines
       for (let c = -2; c <= 2; c++) {
         const line = new THREE.Mesh(new THREE.BoxGeometry(0.01, 0.017, 0.52), panelEdge);
         line.position.set(arr.position.x + c * 0.14, 0.002, 0);
-        line.material = panelEdge;
         wing.add(line);
       }
     }
@@ -117,12 +110,10 @@ export function createIssModel(): THREE.Group {
   addSolarWing(1);
   addSolarWing(-1);
 
-  // Soft beacon light
-  const beacon = new THREE.PointLight(0x67e8f9, 1.4, 2.5, 2);
-  beacon.position.set(0, 0.2, 0);
+  // Tiny marker light only — must NOT light the Earth (was causing white hotspot)
+  const beacon = new THREE.PointLight(0x67e8f9, 0.08, 0.35, 2);
+  beacon.position.set(0, 0.15, 0);
   root.add(beacon);
 
-  // Overall scale applied by caller; normalize bounding
-  root.scale.setScalar(1);
   return root;
 }

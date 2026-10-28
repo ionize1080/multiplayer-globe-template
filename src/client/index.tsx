@@ -578,7 +578,8 @@ function App() {
         <span>
           Powered by <a href="https://threejs.org/">three.js</a>,{" "}
           <a href="https://npmjs.com/package/partyserver/">PartyServer</a>, Celestrak TLE,
-          Open-Meteo, WhereTheISS.at & Yahoo Finance
+          Open-Meteo, WhereTheISS.at & Yahoo Finance · Earth/clouds: NASA Blue Marble via
+          three-globe / three.js examples
         </span>
       </footer>
     </div>

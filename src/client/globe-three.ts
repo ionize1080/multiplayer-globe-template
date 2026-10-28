@@ -79,7 +79,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   // Lights
   scene.add(new THREE.AmbientLight(0xa5d8ff, 0.78));
-  const key = new THREE.DirectionalLight(0xe8f1ff, 1.35);
+  const key = new THREE.DirectionalLight(0xdbeafe, 1.05);
   key.position.set(3.2, 2.4, 3.5);
   scene.add(key);
   const rim = new THREE.DirectionalLight(0x7dd3fc, 0.7);
@@ -100,11 +100,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     metalness: 0,
     emissive: 0x0c1a2e,
     emissiveIntensity: 0.55,
-    clearcoat: 0.06,
-    clearcoatRoughness: 0.75,
-    reflectivity: 0.15,
-    specularIntensity: 0.2,
-    specularColor: new THREE.Color(0x8ecaff),
+    clearcoat: 0.02,
+    clearcoatRoughness: 0.9,
+    reflectivity: 0.05,
+    specularIntensity: 0.08,
+    specularColor: new THREE.Color(0x64748b),
   });
   const earth = new THREE.Mesh(earthGeo, earthMat);
   earthGroup.add(earth);
@@ -122,7 +122,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     for (let i = 0; i < d.length; i += 4) {
       const water = d[i]! / 255; // oceans bright in earth-water.png
       // land ~1.0 rough; ocean ~0.68 — soft water, not mirror
-      const rough = 1 - water * 0.32;
+      const rough = 1 - water * 0.18; // oceans only slightly smoother
       const v = Math.round(rough * 255);
       d[i] = v;
       d[i + 1] = v;
@@ -138,17 +138,37 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   }
 
   const loader = new THREE.TextureLoader();
+  // NASA Blue Marble / night lights via three-globe CDN; clouds via three.js examples
   const TEX = "https://cdn.jsdelivr.net/npm/three-globe@2.31.1/example/img";
+  const CLOUD_TEX =
+    "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_clouds_1024.png";
+
+  loader.load(
+    `${TEX}/earth-blue-marble.jpg`,
+    (day) => {
+      day.colorSpace = THREE.SRGBColorSpace;
+      day.anisotropy = 8;
+      earthMat.map = day;
+      earthMat.color.set(0xffffff);
+      earthMat.needsUpdate = true;
+    },
+    undefined,
+    () => {
+      /* fallback night-only below */
+    },
+  );
   loader.load(
     `${TEX}/earth-night.jpg`,
-    (tex) => {
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.anisotropy = 8;
-      earthMat.map = tex;
-      earthMat.color.set(0xffffff);
-      earthMat.emissiveMap = tex;
-      earthMat.emissive.set(0x6b8fb3);
-      earthMat.emissiveIntensity = 1.2;
+    (night) => {
+      night.colorSpace = THREE.SRGBColorSpace;
+      night.anisotropy = 8;
+      earthMat.emissiveMap = night;
+      earthMat.emissive.set(0x9bb8d4);
+      earthMat.emissiveIntensity = 1.05;
+      if (!earthMat.map) {
+        earthMat.map = night;
+        earthMat.color.set(0xffffff);
+      }
       earthMat.needsUpdate = true;
     },
     undefined,
@@ -162,14 +182,46 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       earthMat.roughnessMap = waterToSoftRoughnessMap(waterTex);
       earthMat.roughness = 1;
       earthMat.metalness = 0;
-      earthMat.clearcoat = 0.08;
-      earthMat.clearcoatRoughness = 0.72;
+      earthMat.clearcoat = 0.025;
+      earthMat.clearcoatRoughness = 0.88;
       earthMat.needsUpdate = true;
       waterTex.dispose();
     },
     undefined,
     () => {
-      /* no water mask — keep matte physical defaults */
+      /* no water mask */
+    },
+  );
+
+  // Drifting cloud layer (randomized start phase)
+  const cloudMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.42,
+    depthWrite: false,
+    roughness: 1,
+    metalness: 0,
+    emissive: 0x1e293b,
+    emissiveIntensity: 0.08,
+  });
+  const clouds = new THREE.Mesh(new THREE.SphereGeometry(1.015, 64, 64), cloudMat);
+  clouds.rotation.y = Math.random() * Math.PI * 2;
+  clouds.rotation.z = (Math.random() - 0.5) * 0.08;
+  earthGroup.add(clouds);
+  const cloudDrift = 0.00012 + Math.random() * 0.00008;
+  loader.load(
+    CLOUD_TEX,
+    (tex) => {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = 4;
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      cloudMat.map = tex;
+      cloudMat.alphaMap = tex;
+      cloudMat.needsUpdate = true;
+    },
+    undefined,
+    () => {
+      clouds.visible = false;
     },
   );
 
@@ -345,12 +397,12 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       map: issGlowTex,
       color: 0xfbbf24,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.35,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     }),
   );
-  issGlow.scale.setScalar(0.18);
+  issGlow.scale.setScalar(0.07);
   earthGroup.add(issGlow);
 
   let satrec: satellite.SatRec | null = null;
@@ -478,7 +530,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         iss.rotateX(Math.PI / 2);
       }
 
-      const pulse = 0.16 + 0.04 * Math.sin(time * 0.004);
+      const pulse = 0.065 + 0.012 * Math.sin(time * 0.004);
       issGlow.scale.setScalar(pulse);
 
       if (time - lastIssEmit > 1000) {
@@ -504,6 +556,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         opts.onIssUpdate?.(null);
       }
     }
+
+    clouds.rotation.y += cloudDrift;
 
     phi += opts.getRotationSpeed();
     root.rotation.y = phi;
