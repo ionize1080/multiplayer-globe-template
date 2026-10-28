@@ -372,19 +372,31 @@ a:hover {
 .globe-wrap {
   position: relative;
   width: min(100%, 560px);
-  aspect-ratio: 1;
-  display: grid;
-  place-items: center;
+  aspect-ratio: 1 / 1;
+  display: block;
+}
+
+.globe-scene {
+  position: absolute;
+  inset: 0;
+  transform-origin: center center;
+  will-change: transform;
 }
 
 .globe-canvas {
-  width: min(100%, 520px);
-  height: min(100%, 520px);
-  aspect-ratio: 1;
-  max-width: 100%;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
   transition: transform 0.08s linear;
   display: block;
   border-radius: 50%;
+  /* drawing buffer is square; never let CSS stretch non-uniformly */
+  object-fit: contain;
 }
 
 .globe-legend {

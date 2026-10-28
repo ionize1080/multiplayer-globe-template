@@ -277,16 +277,14 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const latitude = satellite.degreesLat(gd.latitude);
     const longitude = satellite.degreesLong(gd.longitude);
     const altitude = gd.height;
+    // satellite.js ECI velocity is km/s — keep km/s (do not *1000).
     let velocity = 0;
     if (velocityEci) {
-      velocity =
-        Math.sqrt(
-          velocityEci.x * velocityEci.x +
-            velocityEci.y * velocityEci.y +
-            velocityEci.z * velocityEci.z,
-        ) * 1000; // km/s → m/s? satellite.js velocity is km/s
-      // Keep as km/s * 1000 to match WhereTheISS (m/s) for panel: velocity_km_s * 1000
-      velocity = velocity * 1000;
+      velocity = Math.sqrt(
+        velocityEci.x * velocityEci.x +
+          velocityEci.y * velocityEci.y +
+          velocityEci.z * velocityEci.z,
+      );
     }
     return { latitude, longitude, altitude, velocity, positionEci, velocityEci, gmst };
   }
@@ -313,10 +311,20 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   }
 
   function resize() {
-    const w = canvas.clientWidth || 520;
-    const h = canvas.clientHeight || 520;
-    renderer.setSize(w, h, false);
-    camera.aspect = w / h;
+    // Always render into a *square* viewport matching the CSS box.
+    // Percentage height on the canvas can resolve before the aspect-ratio
+    // parent has a height → clientWidth >> clientHeight → flattened globe.
+    const box = canvas.parentElement ?? canvas;
+    const css = Math.max(
+      1,
+      Math.round(Math.min(box.clientWidth || 0, box.clientHeight || 0) || canvas.clientWidth || 520),
+    );
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(css, css, false);
+    // Keep CSS square fill; avoid three.js writing non-square inline styles.
+    canvas.style.width = "100%";
+    canvas.style.height = "100%";
+    camera.aspect = 1;
     camera.updateProjectionMatrix();
   }
   resize();
@@ -327,6 +335,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   const onResize = () => resize();
   window.addEventListener("resize", onResize);
+  const ro =
+    typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => resize())
+      : null;
+  ro?.observe(canvas.parentElement ?? canvas);
 
   function frame(time: number) {
     if (!running) return;
@@ -397,6 +410,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       running = false;
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", onResize);
+      ro?.disconnect();
       orbitGeo.dispose();
       orbitGlowGeo.dispose();
       earthGeo.dispose();

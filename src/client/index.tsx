@@ -457,6 +457,7 @@ function App() {
                   <div>
                     <span className="muted">Velocity</span>
                     <strong>
+                      {/* live TLE prop is km/s; WhereTheISS dashboard feed is m/s */}
                       {(panelIss.velocity > 100
                         ? panelIss.velocity / 1000
                         : panelIss.velocity
@@ -482,12 +483,17 @@ function App() {
 
         <section className="stage">
           <div className="globe-wrap">
-            <canvas
-              ref={canvasRef as LegacyRef<HTMLCanvasElement>}
-              className="globe-canvas"
+            {/* Zoom scales Earth + CSS atmosphere ring together */}
+            <div
+              className="globe-scene"
               style={{ transform: `scale(${zoom})` }}
-            />
-            <div className="globe-ring" aria-hidden />
+            >
+              <canvas
+                ref={canvasRef as LegacyRef<HTMLCanvasElement>}
+                className="globe-canvas"
+              />
+              <div className="globe-ring" aria-hidden />
+            </div>
             <div className="globe-legend" aria-hidden>
               <span className="legend-dot iss" /> ISS orbit
               <span className="legend-dot visitor" /> visitors
