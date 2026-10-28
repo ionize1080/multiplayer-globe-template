@@ -73,13 +73,13 @@ type TlePayload = {
 
 type CloudMetaPayload = {
   ok: true;
-  date: string;
-  layer: string;
   source: string;
+  observedAt: string | null;
+  checkedAt: string;
+  revision: string;
   texturePath: string;
   width: number;
   height: number;
-  refreshedAt: string;
   lagNote: string;
 };
 
@@ -326,13 +326,11 @@ function App() {
     cloudAmountRef.current = cloudAmount;
   }, [cloudAmount]);
 
-  const [cloudMode, setCloudMode] = useState<CloudMode>("animated");
-  const cloudModeRef = useRef<CloudMode>(cloudMode);
-  useEffect(() => {
-    cloudModeRef.current = cloudMode;
-  }, [cloudMode]);
+  const [cloudMode, setCloudMode] = useState<CloudMode>("live");
   const [cloudStatus, setCloudStatus] = useState("");
-  const [cloudDate, setCloudDate] = useState<string | null>(null);
+  const [cloudMeta, setCloudMeta] = useState<CloudMetaPayload | null>(null);
+  const [cloudWidth, setCloudWidth] = useState(4096);
+  const cloudLoadedRef = useRef(false);
   const globeApiRef = useRef<ReturnType<typeof createGlobeThree> | null>(null);
 
   const now = useNow(1000);
@@ -503,69 +501,59 @@ function App() {
     return () => window.removeEventListener("pagehide", onHide);
   }, []);
 
-  // Near-realtime clouds: fetch NASA mosaic via Worker proxy; refresh ~2h
+  // Satellite masks: refresh metadata without re-decoding an unchanged image.
   useEffect(() => {
     const globe = globeApiRef.current;
     if (!globe) return;
-
     let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | undefined;
+    let busy = false;
+    const controller = new AbortController();
 
     async function applyLive() {
-      setCloudStatus(`加载近实时云图… · ${LIVE_CLOUDS_BUILD}`);
+      if (busy) return;
+      busy = true;
+      if (!cloudLoadedRef.current) setCloudStatus("加载卫星云图…");
       try {
-        const res = await fetch("/api/clouds");
-        const meta = (await res.json()) as CloudMetaPayload | { ok: false; error?: string };
-        if (!res.ok || !("ok" in meta) || meta.ok !== true) {
-          throw new Error(
-            "error" in meta && meta.error ? String(meta.error) : `clouds → ${res.status}`,
-          );
-        }
+        const res = await fetch(`/api/clouds?width=${cloudWidth}`, { signal: controller.signal });
+        const meta = await res.json() as CloudMetaPayload | { ok: false; error?: string };
+        if (!res.ok || !meta.ok) throw new Error("Cloud provider unavailable");
         if (cancelled) return;
-        const result = await globe!.setCloudSource({
-          mode: "live",
-          url: `${meta.texturePath}?d=${encodeURIComponent(meta.date)}&v=${encodeURIComponent(LIVE_CLOUDS_BUILD)}`,
-          date: meta.date,
-        });
-        // Superseded load (StrictMode / rapid toggle) — keep UI on live, newer run wins
-        if (!result.ok && result.error === "stale") return;
-        if (!result.ok) throw new Error(result.error || "setCloudSource failed");
-        // Always clear loading once texture applied if user still wants live
-        // (don't leave status stuck on 加载… when cancelled flips during success)
-        if (cloudModeRef.current === "live") {
-          setCloudDate(meta.date);
-          setCloudStatus(`近实时 · ${meta.date} UTC · ${LIVE_CLOUDS_BUILD}`);
-        }
-        if (cancelled) return;
+        const result = await globe!.setCloudSource({ mode: "live", url: meta.texturePath, revision: meta.revision });
+        if (cancelled || result.error === "stale") return;
+        if (!result.ok) throw new Error(result.error);
+        cloudLoadedRef.current = true;
+        setCloudMeta(meta);
+        setCloudStatus(`${meta.width === 4096 ? "4K" : "2K"} 卫星云层 · 约 3 小时更新`);
       } catch (e) {
         if (cancelled) return;
         console.warn("live clouds failed", e);
-        setCloudStatus(`近实时不可用，已回退动画云图 · ${LIVE_CLOUDS_BUILD}`);
-        setCloudDate(null);
-        await globe!.setCloudSource({ mode: "animated" });
-        setCloudMode("animated");
-      }
+        if (cloudLoadedRef.current) {
+          setCloudStatus("刷新失败，保留上一张卫星云图");
+        } else {
+          await globe!.setCloudSource({ mode: "animated" });
+          if (!cancelled) setCloudStatus("卫星云图暂不可用，显示动画云；稍后自动重试");
+        }
+      } finally { busy = false; }
     }
 
     if (cloudMode === "animated") {
-      void globe.setCloudSource({ mode: "animated" }).then(() => {
-        if (!cancelled) {
-          setCloudDate(null);
-          setCloudStatus("");
-        }
-      });
-      return () => {
-        cancelled = true;
-      };
+      cloudLoadedRef.current = false;
+      setCloudMeta(null);
+      setCloudStatus("装饰动画云 · 非当前天气");
+      void globe.setCloudSource({ mode: "animated" });
+      return () => { cancelled = true; controller.abort(); };
     }
-
     void applyLive();
-    timer = setInterval(applyLive, 2 * 60 * 60 * 1000);
+    const timer = setInterval(applyLive, 15 * 60 * 1000);
+    const refreshOnReturn = () => { if (!document.hidden) void applyLive(); };
+    document.addEventListener("visibilitychange", refreshOnReturn);
     return () => {
       cancelled = true;
-      if (timer) clearInterval(timer);
+      controller.abort();
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshOnReturn);
     };
-  }, [cloudMode]);
+  }, [cloudMode, cloudWidth]);
 
   // Starlink catalog via Worker proxy — load when layer enabled (retry + always clear loading)
   useEffect(() => {
@@ -1065,9 +1053,10 @@ function App() {
                   type="button"
                   className={cloudMode === "animated" ? "seg active" : "seg"}
                   onClick={() => {
+                    if (cloudMode === "animated") return;
                     setCloudMode("animated");
                     setCloudStatus("");
-                    setCloudDate(null);
+                    setCloudMeta(null);
                   }}
                 >
                   动画云图
@@ -1076,30 +1065,52 @@ function App() {
                   type="button"
                   className={cloudMode === "live" ? "seg active" : "seg"}
                   onClick={() => {
+                    if (cloudMode === "live") return;
                     setCloudMode("live");
-                    setCloudAmount(0.4); // lighter default so land stays readable
-                    setCloudStatus(`加载近实时云图… · ${LIVE_CLOUDS_BUILD}`);
+                    setCloudAmount(0.55);
+                    setCloudStatus("加载卫星云图…");
                   }}
                 >
-                  近实时云图
+                  卫星云图
                 </button>
               </div>
               {cloudStatus ? (
                 <p
                   className={
-                    cloudStatus.includes("回退") || cloudStatus.includes("不可用")
+                    cloudStatus.includes("失败") || cloudStatus.includes("不可用")
                       ? "cloud-status is-error"
                       : "cloud-status"
                   }
-                  title={cloudDate || undefined}
+                  title={LIVE_CLOUDS_BUILD}
                 >
                   {cloudStatus}
                 </p>
               ) : null}
               {cloudMode === "live" ? (
-                <p className="cloud-status" style={{ opacity: 0.75 }}>
-                  近实时默认 Clouds 40%（可调）· 偏亮白云遮罩
-                </p>
+                <>
+                  <div className="segmented" role="group" aria-label="卫星云图清晰度">
+                    {[2048, 4096].map((width) => (
+                      <button type="button" key={width} aria-pressed={cloudWidth === width}
+                        className={cloudWidth === width ? "seg active" : "seg"}
+                        onClick={() => {
+                          if (cloudWidth === width) return;
+                          setCloudWidth(width); setCloudStatus("切换云图清晰度…");
+                        }}>
+                        {width === 2048 ? "2K · 省流量" : "4K · 精细云层"}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="cloud-status" style={{ opacity: 0.75 }}>
+                    保留气旋云系结构；缺测与极区不补造云。更新时柔和过渡，云系不做虚构漂移。
+                  </p>
+                  <p className="cloud-status" style={{ opacity: 0.75 }}>
+                    观测时刻：上游未提供{cloudMeta ? ` · 最近检查 ${new Date(cloudMeta.checkedAt).toISOString().slice(11, 16)} UTC` : ""}
+                  </p>
+                  <p className="cloud-status" style={{ opacity: 0.75 }}>
+                    <a href="https://github.com/matteason/live-cloud-maps" target="_blank" rel="noreferrer">EUMETSAT / Live Cloud Maps</a>
+                    <br />Contains modified EUMETSAT data
+                  </p>
+                </>
               ) : null}
             </div>
           </div>

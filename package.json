@@ -32,7 +32,7 @@
     "wrangler": "4.16.1"
   },
   "scripts": {
-    "test": "esbuild tests/sun-lighting.test.ts --bundle --platform=node --format=cjs --outfile=.wrangler/tests/sun-lighting.test.cjs && node --test .wrangler/tests/sun-lighting.test.cjs",
+    "test": "esbuild tests/*.test.ts --bundle --platform=node --format=cjs --outdir=.wrangler/tests --out-extension:.js=.cjs && node --test .wrangler/tests/*.test.cjs",
     "cf-typegen": "wrangler types ./src/server/worker-configuration.d.ts",
     "check": "tsc --project src/client && tsc --project src/server && wrangler deploy --dry-run",
     "deploy": "wrangler deploy",

@@ -1,5 +1,8 @@
 import * as THREE from "three";
 import * as satellite from "satellite.js";
+import { normalizeCloudRows } from "./cloud-mask";
+import { sampleOrbit } from "./orbit-sampler";
+import { OrbitInterpolator } from "./orbit-interpolation";
 import { createIssModel } from "./iss-model";
 import { photoSunDirection, type SunLighting } from "./sun-lighting";
 
@@ -22,7 +25,7 @@ export type CloudMode = "animated" | "live";
 
 export type CloudSource =
   | { mode: "animated" }
-  | { mode: "live"; url: string; date?: string };
+  | { mode: "live"; url: string; revision: string };
 
 type GlobeThreeOptions = {
   canvas: HTMLCanvasElement;
@@ -146,9 +149,9 @@ const CLOUD_TEX =
 const CLOUD_TEX_FALLBACK =
   "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_clouds_1024.png";
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
-export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
+export const LIVE_CLOUDS_BUILD = "c8-20261028-satellite-alpha";
 /** ISS far-side dim + visitor ripple markers */
-export const GLOBE_FX_BUILD = "fx24-20261028-photo-light";
+export const GLOBE_FX_BUILD = "fx25-20261028-smooth-clouds";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -528,12 +531,42 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   let animatedCloudTex: THREE.Texture | null = null;
   let liveCloudTex: THREE.Texture | null = null;
   let liveLoadToken = 0;
+  let liveCloudKey = "";
+  let liveCloudAbort: AbortController | null = null;
+  let outgoingCloudTex: THREE.Texture | null = null;
+  let cloudTransitionStart = 0;
+  const cloudBlend = {
+    uPreviousCloud: { value: null as THREE.Texture | null },
+    uCloudBlend: { value: 1 },
+  };
+  for (const material of [cloudMat, cloudShadowMat]) {
+    material.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, cloudBlend);
+      shader.fragmentShader = "uniform sampler2D uPreviousCloud;\nuniform float uCloudBlend;\n" + shader.fragmentShader;
+      shader.fragmentShader = shader.fragmentShader.replace("#include <map_fragment>", `
+        #include <map_fragment>
+        #ifdef USE_MAP
+          diffuseColor.a = opacity * mix(texture2D(uPreviousCloud, vMapUv).a, texture2D(map, vMapUv).a, uCloudBlend);
+        #endif
+      `);
+    };
+    material.customProgramCacheKey = () => "satellite-cloud-crossfade-v1";
+  }
+
+  function finishCloudTransition() {
+    cloudBlend.uPreviousCloud.value = cloudMat.map;
+    cloudBlend.uCloudBlend.value = 1;
+    outgoingCloudTex?.dispose();
+    outgoingCloudTex = null;
+  }
 
   function bindCloudTex(tex: THREE.Texture, wrap: THREE.Wrapping = THREE.RepeatWrapping) {
     tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = 8;
-    tex.wrapS = tex.wrapT = wrap;
+    tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    tex.wrapS = wrap;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
     cloudMat.map = tex;
+    if (!outgoingCloudTex) cloudBlend.uPreviousCloud.value = tex;
     // Both sources are white RGB + coverage in A. alphaMap samples GREEN,
     // which is always 1 in the live mask; use map's actual alpha instead.
     cloudMat.alphaMap = null;
@@ -545,6 +578,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   }
 
   function applyCloudTex(tex: THREE.Texture) {
+    if (disposed) { tex.dispose(); return; }
     // Normalize grayscale/RGBA sources once so gray mask pixels cannot tint
     // the ocean. A single texture is shared by clouds and their sparse shadow.
     const img = tex.image as CanvasImageSource & { width: number; height: number };
@@ -590,304 +624,92 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     });
   }
 
-  /**
-   * NASA true-color → bright WHITE cloud mask (c7).
-   * Higher lum gate + gamma; fill dark vertical barcode bands with white wisps
-   * + narrow neighbor alpha bleed (not ocean smear). Chunked with rAF yields.
-   */
-  async function trueColorToCloudMask(url: string): Promise<THREE.CanvasTexture> {
-    const res = await fetch(url);
+  async function satelliteCloudMask(url: string, signal: AbortSignal): Promise<THREE.CanvasTexture> {
+    const res = await fetch(url, { signal });
     if (!res.ok) throw new Error(`live cloud texture → ${res.status}`);
+    if (!res.headers.get("content-type")?.includes("image/png")) throw new Error("Cloud texture is not PNG");
     const blob = await res.blob();
-    if (!blob.type.includes("png") && blob.size < 50_000) {
-      throw new Error("live cloud texture empty/non-png");
-    }
-    await yieldFrame();
+    if (signal.aborted) throw new Error("stale");
     const bmp = await createImageBitmap(blob);
-    const w = bmp.width;
-    const h = bmp.height;
+    const maxWidth = Math.min(4096, renderer.capabilities.maxTextureSize);
+    const w = Math.min(bmp.width, maxWidth);
+    const h = Math.round(w / 2);
+    if (bmp.width !== 2 * bmp.height || bmp.width > 8192 || bmp.width < 1024) {
+      bmp.close();
+      throw new Error("Unexpected cloud texture dimensions");
+    }
     const c = document.createElement("canvas");
-    c.width = w;
-    c.height = h;
+    c.width = w; c.height = h;
     const ctx = c.getContext("2d", { willReadFrequently: true })!;
-    ctx.drawImage(bmp, 0, 0);
+    ctx.drawImage(bmp, 0, 0, w, h);
     bmp.close();
-    await yieldFrame();
-    const id = ctx.getImageData(0, 0, w, h);
-    const d = id.data;
-    const isNodata = new Uint8Array(w * h);
-    const colNodata = new Float32Array(w);
-    const colMeanA = new Float32Array(w);
-    const colBright = new Float32Array(w);
-    let opaqueN = 0;
-    let nodataN = 0;
-    const total = w * h;
-    const ROW_CHUNK = 32;
-
-    // Bright-white-only extract: kill mid-gray ocean veil / muddy speckles
-    for (let y0 = 0; y0 < h; y0 += ROW_CHUNK) {
-      const y1 = Math.min(h, y0 + ROW_CHUNK);
-      for (let y = y0; y < y1; y++) {
-        for (let x = 0; x < w; x++) {
-          const i = (y * w + x) << 2;
-          const r = d[i]!;
-          const g = d[i + 1]!;
-          const b = d[i + 2]!;
-          const aIn = d[i + 3]!;
-          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-          const mx = Math.max(r, g, b);
-          const mn = Math.min(r, g, b);
-          const sat = mx > 1 ? (mx - mn) / mx : 0;
-
-          const nodata = aIn < 8 || lum < 10;
-          if (nodata) {
-            nodataN++;
-            isNodata[y * w + x] = 1;
-            colNodata[x]! += 1;
-            d[i] = d[i + 1] = d[i + 2] = 255;
-            d[i + 3] = 0;
-            continue;
-          }
-
-          // Desert / land warm bright → suppress
-          const warm = r - b > 28 && r > 130 && sat > 0.1;
-          // Only fairly bright, low-sat pixels count as cloud
-          let score =
-            Math.min(1, Math.max(0, (lum - 145) / 75)) *
-            Math.min(1, Math.max(0, 1.35 - sat * 2.4));
-          if (warm) score *= 0.12;
-          // Stronger gamma → punchy white cores, sparse thin haze
-          score = Math.pow(Math.min(1, score), 0.55);
-          const alpha = score < 0.08 ? 0 : Math.round(score * 255);
-          d[i] = d[i + 1] = d[i + 2] = 255;
-          d[i + 3] = alpha;
-          colMeanA[x]! += alpha;
-          if (alpha > 40) {
-            opaqueN++;
-            colBright[x]! += 1;
-          }
-        }
-      }
+    const pixels = ctx.getImageData(0, 0, w, h);
+    for (let y = 0; y < h; y += 32) {
+      if (signal.aborted) throw new Error("stale");
+      normalizeCloudRows(pixels.data, w, h, y, Math.min(h, y + 32));
       await yieldFrame();
     }
-
-    const coverage = opaqueN / total;
-    const nodataRatio = nodataN / total;
-    if (coverage < 0.05) {
-      throw new Error(`live cloud coverage too low (${(coverage * 100).toFixed(1)}%)`);
-    }
-    if (coverage > 0.85) {
-      throw new Error(`live cloud coverage implausible (${(coverage * 100).toFixed(1)}%)`);
-    }
-    if (nodataRatio > 0.55) {
-      throw new Error(`live cloud mosaic too incomplete (nodata ${(nodataRatio * 100).toFixed(0)}%)`);
-    }
-
-    for (let x = 0; x < w; x++) {
-      colNodata[x]! /= h;
-      colMeanA[x]! /= h;
-      colBright[x]! /= h;
-    }
-
-    // Gap = elevated nodata OR dark/empty vertical band (low mean alpha vs neighbors)
-    let medianNd = 0;
-    let medianA = 0;
-    {
-      const sn = Array.from(colNodata).sort((a, b) => a - b);
-      const sa = Array.from(colMeanA).sort((a, b) => a - b);
-      medianNd = sn[Math.floor(sn.length / 2)]!;
-      medianA = sa[Math.floor(sa.length / 2)]!;
-    }
-    const gapCol = new Uint8Array(w);
-    for (let x = 0; x < w; x++) {
-      let localMax = 0;
-      for (let k = Math.max(0, x - 40); k <= Math.min(w - 1, x + 40); k++) {
-        localMax = Math.max(localMax, colMeanA[k]!);
-      }
-      const darkStrip =
-        localMax > 35 && colMeanA[x]! < localMax * 0.38 && colMeanA[x]! < medianA * 0.85;
-      const ndGap = colNodata[x]! >= Math.max(0.14, medianNd + 0.03);
-      if (ndGap || darkStrip) gapCol[x] = 1;
-    }
-    // Dilate gap marks 4px so narrow barcodes are fully covered
-    {
-      const copy = gapCol.slice();
-      for (let x = 0; x < w; x++) {
-        if (!copy[x]) continue;
-        for (let k = Math.max(0, x - 4); k <= Math.min(w - 1, x + 4); k++) gapCol[k] = 1;
-      }
-    }
-
-    const gapW = new Float32Array(w);
-    const FEATHER = 14;
-    for (let x = 0; x < w; x++) {
-      if (!gapCol[x]) continue;
-      for (let k = Math.max(0, x - FEATHER); k <= Math.min(w - 1, x + FEATHER); k++) {
-        const dist = Math.abs(k - x) / FEATHER;
-        gapW[k] = Math.max(gapW[k]!, 1 - dist);
-      }
-    }
-
-    let wispData: Uint8ClampedArray | null = null;
-    for (const src of [CLOUD_TEX_FALLBACK, CLOUD_TEX]) {
-      try {
-        const wispRes = await fetch(src, { mode: "cors" });
-        if (!wispRes.ok) continue;
-        await yieldFrame();
-        const wispBmp = await createImageBitmap(await wispRes.blob());
-        const wc = document.createElement("canvas");
-        wc.width = w;
-        wc.height = h;
-        const wctx = wc.getContext("2d", { willReadFrequently: true })!;
-        wctx.drawImage(wispBmp, 0, 0, w, h);
-        wispBmp.close();
-        wispData = wctx.getImageData(0, 0, w, h).data;
-        break;
-      } catch {
-        /* next */
-      }
-    }
-    await yieldFrame();
-
-    function wispAlphaAt(i: number): number {
-      if (!wispData) return 140;
-      const wl =
-        0.299 * wispData[i]! + 0.587 * wispData[i + 1]! + 0.114 * wispData[i + 2]!;
-      // Bias wisps toward white (lift floor)
-      return Math.round(Math.min(255, (wl / 255) * 200 + 40));
-    }
-
-    // Snapshot alphas for neighbor bleed (pre-fill)
-    const liveSnap = new Uint8Array(w * h);
-    for (let p = 0; p < liveSnap.length; p++) liveSnap[p] = d[(p << 2) + 3]!;
-
-    for (let y0 = 0; y0 < h; y0 += ROW_CHUNK) {
-      const y1 = Math.min(h, y0 + ROW_CHUNK);
-      for (let y = y0; y < y1; y++) {
-        const row = y * w;
-        for (let x = 0; x < w; x++) {
-          const p = row + x;
-          const i = p << 2;
-          const gw = gapW[x]!;
-          const live = liveSnap[p]!;
-
-          if (!gapCol[x] && !isNodata[p] && gw < 0.08) continue;
-
-          // Narrow neighbor cloud bleed (white alpha only — never ocean RGB)
-          let bleed = 0;
-          const span = 10;
-          let xl = x - 1;
-          while (xl >= 0 && xl >= x - span && (gapCol[xl] || liveSnap[row + xl]! < 30)) xl--;
-          let xr = x + 1;
-          while (xr < w && xr <= x + span && (gapCol[xr] || liveSnap[row + xr]! < 30)) xr++;
-          if (xl >= 0 && xr < w && xl >= x - span && xr <= x + span) {
-            const t = (x - xl) / Math.max(1, xr - xl);
-            bleed = (1 - t) * liveSnap[row + xl]! + t * liveSnap[row + xr]!;
-          } else if (xl >= 0 && xl >= x - span) {
-            bleed = liveSnap[row + xl]! * 0.75;
-          } else if (xr < w && xr <= x + span) {
-            bleed = liveSnap[row + xr]! * 0.75;
-          }
-
-          const wa = wispAlphaAt(i);
-          if (isNodata[p] || gapCol[x]) {
-            // Wisp-dominated fill (not flat gray floor); light bleed only
-            const fill = Math.round(wa * 0.82 + bleed * 0.22);
-            const out = Math.max(live, fill);
-            d[i] = d[i + 1] = d[i + 2] = 255;
-            d[i + 3] = Math.min(190, out);
-            continue;
-          }
-
-          // Soft edge into gap zone
-          if (gw > 0.08 && live > 0) {
-            const mix = gw * 0.4;
-            d[i + 3] = Math.round(live * (1 - mix * 0.25) + wa * mix * 0.45);
-          }
-        }
-      }
-      await yieldFrame();
-    }
-
-    // Soften barcode fill edges only (3px horiz, gap columns) — not ocean smear
-    {
-      const tmp = new Uint8Array(w * h);
-      for (let p = 0; p < tmp.length; p++) tmp[p] = d[(p << 2) + 3]!;
-      for (let y = 0; y < h; y++) {
-        const row = y * w;
-        for (let x = 0; x < w; x++) {
-          if (gapW[x]! < 0.2) continue;
-          let sum = 0;
-          let n = 0;
-          for (let k = Math.max(0, x - 3); k <= Math.min(w - 1, x + 3); k++) {
-            sum += tmp[row + k]!;
-            n++;
-          }
-          const i = (row + x) << 2;
-          const blended = sum / n;
-          const m = Math.min(1, gapW[x]!);
-          d[i + 3] = Math.round(tmp[row + x]! * (1 - m * 0.65) + blended * (m * 0.65));
-        }
-      }
-    }
-
-    ctx.putImageData(id, 0, 0);
-    await yieldFrame();
-
-    const soft = document.createElement("canvas");
-    soft.width = w;
-    soft.height = h;
-    const sctx = soft.getContext("2d")!;
-    sctx.filter = "blur(1.1px)";
-    sctx.drawImage(c, 0, 0);
-
-    const tex = new THREE.CanvasTexture(soft);
+    ctx.putImageData(pixels, 0, 0);
+    const tex = new THREE.CanvasTexture(c);
     tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = 8;
-    tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
-    tex.needsUpdate = true;
-    (tex as THREE.Texture & { userData: Record<string, string> }).userData = {
-      liveCloudsBuild: LIVE_CLOUDS_BUILD,
-    };
+    tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
     return tex;
   }
 
   async function setCloudSource(source: CloudSource): Promise<{ ok: boolean; error?: string }> {
+    const token = ++liveLoadToken;
+    liveCloudAbort?.abort();
+    liveCloudAbort = null;
     if (source.mode === "animated") {
-      liveLoadToken += 1;
+      finishCloudTransition();
       cloudMode = "animated";
       cloudDrift = cloudDriftBase;
       cloudDrift2 = cloudDrift2Base;
-      clouds.rotation.y = animatedCloudRotY;
-      clouds.rotation.z = animatedCloudRotZ;
+      clouds.rotation.set(0, animatedCloudRotY, animatedCloudRotZ);
       cloudShadow.rotation.copy(clouds.rotation);
       if (animatedCloudTex) bindCloudTex(animatedCloudTex, THREE.RepeatWrapping);
+      else {
+        cloudMat.map = cloudShadowMat.map = null;
+        cloudBlend.uPreviousCloud.value = null;
+        cloudMat.needsUpdate = cloudShadowMat.needsUpdate = true;
+        cloudsReady = false;
+      }
+      liveCloudTex?.dispose();
+      liveCloudTex = null;
+      liveCloudKey = "";
       applyCloudAmount(opts.getCloudAmount());
       return { ok: true };
     }
-
-    const token = ++liveLoadToken;
+    const key = source.url + source.revision;
+    if (key === liveCloudKey && cloudMode === "live") return { ok: true };
+    const controller = new AbortController();
+    liveCloudAbort = controller;
     try {
-      const tex = await trueColorToCloudMask(source.url);
-      if (token !== liveLoadToken) {
+      const tex = await satelliteCloudMask(source.url, controller.signal);
+      if (token !== liveLoadToken || disposed) {
         tex.dispose();
         return { ok: false, error: "stale" };
       }
-      if (liveCloudTex) liveCloudTex.dispose();
+      finishCloudTransition();
+      outgoingCloudTex = liveCloudTex;
       liveCloudTex = tex;
+      liveCloudKey = key;
       cloudMode = "live";
-      cloudDrift = 0;
-      // Keep visible wispy drift so gap fill doesn't look frozen/static
-      cloudDrift2 = cloudDrift2Base * 0.85;
-      // Align equirectangular mosaic with Blue Marble (no decorative drift offset)
-      clouds.rotation.y = 0;
-      clouds.rotation.z = 0;
+      cloudDrift = cloudDrift2 = 0;
+      clouds.rotation.set(0, 0, 0);
       cloudShadow.rotation.set(0, 0, 0);
-      bindCloudTex(tex, THREE.ClampToEdgeWrapping);
+      bindCloudTex(tex, THREE.RepeatWrapping);
+      if (outgoingCloudTex) {
+        cloudBlend.uPreviousCloud.value = outgoingCloudTex;
+        cloudBlend.uCloudBlend.value = 0;
+        cloudTransitionStart = performance.now();
+      }
       applyCloudAmount(opts.getCloudAmount());
       return { ok: true };
     } catch (e) {
-      return { ok: false, error: String(e) };
+      return { ok: false, error: token !== liveLoadToken || controller.signal.aborted ? "stale" : String(e) };
     }
   }
 
@@ -1223,18 +1045,14 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   (issCyanGlow.material as THREE.SpriteMaterial).opacity = ISS_CYAN_OPACITY;
 
   // --- Starlink constellation as Points (chunked SGP4, no heavy meshes) ---
-  const STARLINK_CHUNK = 320;
-  const STARLINK_REFRESH_MS = 15_000;
-  const STARLINK_ALT_FALLBACK_KM = 550;
+  const STARLINK_CHUNK = 64;
   const STARLINK_HARD_MAX = 8000;
   const STARLINK_DEFAULT_DENSITY = 2200;
   const STARLINK_DEFAULT_BRIGHTNESS = 0.42;
   let starlinkCatalog: StarlinkTlePair[] = [];
   let starlinkSatrecs: satellite.SatRec[] = [];
-  let starlinkPropCursor = 0;
-  let starlinkPropActive = false;
-  let starlinkLastFull = 0;
-  let starlinkCount = 0;
+  let starlinkMotion: OrbitInterpolator | null = null;
+  let starlinkDrawn = 0;
   let starlinkAppliedDensity = -1;
   const starlinkPositions = new Float32Array(3); // replaced on catalog load
   let starlinkPosAttr = new THREE.BufferAttribute(starlinkPositions, 3);
@@ -1262,7 +1080,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     );
     if (!starlinkCatalog.length) {
       starlinkSatrecs = [];
-      starlinkCount = 0;
+      starlinkMotion = null;
+      starlinkDrawn = 0;
       starlinkAppliedDensity = max;
       starlinkPoints.visible = false;
       starlinkGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(3), 3));
@@ -1281,16 +1100,14 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       if (recs.length >= max) break;
     }
     starlinkSatrecs = recs;
-    starlinkCount = recs.length;
     starlinkAppliedDensity = max;
     const buf = new Float32Array(Math.max(1, recs.length) * 3);
     starlinkPosAttr = new THREE.BufferAttribute(buf, 3);
     starlinkPosAttr.setUsage(THREE.DynamicDrawUsage);
     starlinkGeo.setAttribute("position", starlinkPosAttr);
-    starlinkGeo.setDrawRange(0, recs.length);
-    starlinkPropCursor = 0;
-    starlinkPropActive = true;
-    starlinkLastFull = 0;
+    starlinkGeo.setDrawRange(0, 0);
+    starlinkDrawn = 0;
+    starlinkMotion = new OrbitInterpolator(recs.length, (index, time) => sampleOrbit(starlinkSatrecs[index]!, time));
   }
 
   function setStarlinkTles(tles: StarlinkTlePair[] | null) {
@@ -1310,44 +1127,18 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     }
   }
 
-  function tickStarlink(now: Date, time: number, show: boolean) {
-    if (!show || starlinkCount === 0) {
+  function tickStarlink(now: Date, _time: number, show: boolean) {
+    if (!show || !starlinkMotion) {
       starlinkPoints.visible = false;
+      starlinkDrawn = 0;
       return;
     }
-    starlinkPoints.visible = true;
-    if (!starlinkPropActive && (time - starlinkLastFull > STARLINK_REFRESH_MS || starlinkLastFull === 0)) {
-      starlinkPropActive = true;
-      starlinkPropCursor = 0;
-    }
-    if (!starlinkPropActive) return;
-    const arr = starlinkPosAttr.array as Float32Array;
-    const end = Math.min(starlinkPropCursor + STARLINK_CHUNK, starlinkCount);
-    for (let i = starlinkPropCursor; i < end; i++) {
-      const rec = starlinkSatrecs[i]!;
-      const pv = satellite.propagate(rec, now);
-      let lat = 0;
-      let lng = 0;
-      let alt = STARLINK_ALT_FALLBACK_KM;
-      if (pv && pv.position && typeof pv.position !== "boolean") {
-        const gmst = satellite.gstime(now);
-        const gd = satellite.eciToGeodetic(pv.position as satellite.EciVec3<number>, gmst);
-        lat = satellite.degreesLat(gd.latitude);
-        lng = satellite.degreesLong(gd.longitude);
-        alt = (gd.height || 0) > 50 ? gd.height : STARLINK_ALT_FALLBACK_KM;
-      }
-      latLngAltToVec3(lat, lng, alt, tmp);
-      const o = i * 3;
-      arr[o] = tmp.x;
-      arr[o + 1] = tmp.y;
-      arr[o + 2] = tmp.z;
-    }
-    starlinkPropCursor = end;
-    if (starlinkPropCursor >= starlinkCount) {
-      starlinkPosAttr.needsUpdate = true;
-      starlinkPropActive = false;
-      starlinkLastFull = time;
-    }
+    const epoch = now.getTime();
+    starlinkMotion.update(epoch, STARLINK_CHUNK);
+    starlinkDrawn = starlinkMotion.render(epoch, starlinkPosAttr.array as Float32Array);
+    starlinkGeo.setDrawRange(0, starlinkDrawn);
+    starlinkPosAttr.needsUpdate = true;
+    starlinkPoints.visible = starlinkDrawn > 0;
   }
 
   let satrec: satellite.SatRec | null = null;
@@ -1878,6 +1669,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
     tickStarlink(now, time, showStarlink);
 
+    if (outgoingCloudTex) {
+      const t = Math.min(1, Math.max(0, (time - cloudTransitionStart) / 1800));
+      cloudBlend.uCloudBlend.value = t * t * (3 - 2 * t);
+      if (t === 1) finishCloudTransition();
+    }
     applyCloudAmount(opts.getCloudAmount());
     clouds.rotation.y += cloudDrift;
     clouds2.rotation.y += cloudDrift2;
@@ -1926,6 +1722,9 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   function destroy() {
     disposed = true;
+    liveLoadToken++;
+    liveCloudAbort?.abort();
+    finishCloudTransition();
     persistViewPose(
       viewTheta,
       viewPhi,
@@ -1975,6 +1774,6 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     resize,
     setCloudSource,
     setStarlinkTles,
-    getStarlinkDrawn: () => starlinkCount,
+    getStarlinkDrawn: () => starlinkDrawn,
   };
 }
