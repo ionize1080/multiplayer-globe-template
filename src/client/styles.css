@@ -367,6 +367,7 @@ a:hover {
   justify-content: flex-start;
   gap: 1rem;
   min-height: 560px;
+  overflow: visible;
 }
 
 .globe-wrap {
@@ -374,6 +375,7 @@ a:hover {
   width: min(100%, 560px);
   aspect-ratio: 1 / 1;
   display: block;
+  overflow: visible;
 }
 
 .globe-scene {
@@ -381,6 +383,7 @@ a:hover {
   inset: 0;
   transform-origin: center center;
   will-change: transform;
+  overflow: visible;
 }
 
 .globe-canvas {
@@ -395,8 +398,8 @@ a:hover {
   transition: transform 0.08s linear;
   display: block;
   border-radius: 50%;
-  /* drawing buffer is square; never let CSS stretch non-uniformly */
   object-fit: contain;
+  overflow: visible;
 }
 
 .globe-legend {
@@ -436,29 +439,7 @@ a:hover {
   margin-left: 0.35rem;
 }
 
-.globe-ring {
-  position: absolute;
-  inset: 8%;
-  border-radius: 50%;
-  border: 1px solid rgba(56, 189, 248, 0.18);
-  box-shadow:
-    0 0 40px rgba(56, 189, 248, 0.12),
-    inset 0 0 40px rgba(37, 99, 235, 0.12);
-  pointer-events: none;
-  animation: ring-breathe 5s ease-in-out infinite;
-}
-
-@keyframes ring-breathe {
-  0%,
-  100% {
-    transform: scale(0.98);
-    opacity: 0.55;
-  }
-  50% {
-    transform: scale(1.02);
-    opacity: 1;
-  }
-}
+/* .globe-ring removed — atmosphere is three.js Fresnel on earthGroup */
 
 .speed-control {
   width: min(100%, 360px);

@@ -483,7 +483,7 @@ function App() {
 
         <section className="stage">
           <div className="globe-wrap">
-            {/* Zoom scales Earth + CSS atmosphere ring together */}
+            {/* Zoom scales three.js Earth + Fresnel atmosphere together */}
             <div
               className="globe-scene"
               style={{ transform: `scale(${zoom})` }}
@@ -492,7 +492,6 @@ function App() {
                 ref={canvasRef as LegacyRef<HTMLCanvasElement>}
                 className="globe-canvas"
               />
-              <div className="globe-ring" aria-hidden />
             </div>
             <div className="globe-legend" aria-hidden>
               <span className="legend-dot iss" /> ISS orbit
