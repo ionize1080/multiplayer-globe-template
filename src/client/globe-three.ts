@@ -41,6 +41,8 @@ const CLOUD_TEX =
   "https://cdn.jsdelivr.net/gh/turban/webgl-earth@master/images/fair_clouds_4k.png";
 const CLOUD_TEX_FALLBACK =
   "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_clouds_1024.png";
+/** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
+export const LIVE_CLOUDS_BUILD = "c5-20261028-seam-wisp";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -320,6 +322,18 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     tex.wrapS = tex.wrapT = wrap;
     cloudMat.map = tex;
     cloudMat.alphaMap = tex;
+    // Live: unlit-ish white so TrueColor mask isn't muddy gray under night lighting
+    if (cloudMode === "live") {
+      cloudMat.color.set(0xffffff);
+      cloudMat.emissive.set(0xffffff);
+      cloudMat.emissiveIntensity = 0.62;
+      cloudMat.roughness = 1;
+      cloudMat.metalness = 0;
+    } else {
+      cloudMat.color.set(0xffffff);
+      cloudMat.emissive.set(0x334155);
+      cloudMat.emissiveIntensity = 0.04;
+    }
     cloudMat.needsUpdate = true;
     cloudShadowMat.alphaMap = tex;
     cloudShadowMat.needsUpdate = true;
@@ -335,20 +349,22 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const a = Math.min(1, Math.max(0, amount));
     const on = a > 0.02 && (cloudsReady || !!cloudMat.map);
     clouds.visible = on;
-    // Live mode: keep a clearly visible wispy shell so orbital gaps aren't bald
+    // Live: global soft fair_clouds shell so orbital barcodes never read empty
     clouds2.visible = on;
     cloudShadow.visible = on;
-    cloudMat.opacity = 0.12 + a * 0.58; // 0.12..0.70 (R3: less veil over city lights)
+    cloudMat.opacity =
+      cloudMode === "live" ? 0.18 + a * 0.55 : 0.12 + a * 0.58;
     cloudMat2.opacity =
       cloudMode === "live"
-        ? 0.10 + a * 0.22 // soft animated fill over nodata; keep white look
-        : 0.04 + a * 0.32; // 0.04..0.36
-    cloudShadowMat.opacity = a * (cloudMode === "live" ? 0.16 : 0.32);
+        ? 0.16 + a * 0.28 // clearly visible animated underlay
+        : 0.04 + a * 0.32;
+    cloudShadowMat.opacity = a * (cloudMode === "live" ? 0.14 : 0.32);
   }
 
   /**
-   * NASA true-color mosaic → white clouds + transparent clear sky.
-   * Nodata holes get soft WHITE wispy fill only — no horizontal ocean smear (Aura c3).
+   * NASA true-color mosaic → soft WHITE clouds + transparent clear sky.
+   * Gap columns: fill nodata (+ low alpha inside gaps) with wisps; no ocean smear.
+   * Build: LIVE_CLOUDS_BUILD
    */
   async function trueColorToCloudMask(url: string): Promise<THREE.CanvasTexture> {
     const res = await fetch(url);
@@ -369,10 +385,12 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const id = ctx.getImageData(0, 0, w, h);
     const d = id.data;
     const isNodata = new Uint8Array(w * h);
+    const colNodata = new Float32Array(w);
     let opaqueN = 0;
     let nodataN = 0;
     const total = w * h;
 
+    // Softer / brighter TrueColor→alpha (less muddy speckles)
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = (y * w + x) << 2;
@@ -389,21 +407,23 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         if (nodata) {
           nodataN++;
           isNodata[y * w + x] = 1;
+          colNodata[x]! += 1;
           d[i] = d[i + 1] = d[i + 2] = 255;
           d[i + 3] = 0;
           continue;
         }
 
-        const warm = r - b > 28 && r > 135;
+        const warm = r - b > 32 && r > 145 && sat > 0.12;
+        // Lower floor + gamma → soft white haze instead of sparse gray dots
         let score =
-          Math.min(1, Math.max(0, (lum - 95) / 90)) *
-          Math.min(1, Math.max(0, 1.15 - sat * 2.1));
-        if (warm) score *= 0.22;
-        score = Math.min(1, score * 1.12);
-        const alpha = score < 0.06 ? 0 : Math.round(score * 255);
+          Math.min(1, Math.max(0, (lum - 72) / 110)) *
+          Math.min(1, Math.max(0, 1.25 - sat * 1.85));
+        if (warm) score *= 0.18;
+        score = Math.pow(Math.min(1, score * 1.2), 0.82);
+        const alpha = score < 0.04 ? 0 : Math.round(score * 255);
         d[i] = d[i + 1] = d[i + 2] = 255;
         d[i + 3] = alpha;
-        if (alpha > 20) opaqueN++;
+        if (alpha > 18) opaqueN++;
       }
     }
 
@@ -419,82 +439,95 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       throw new Error(`live cloud mosaic too incomplete (nodata ${(nodataRatio * 100).toFixed(0)}%)`);
     }
 
-    // Distance-to-nodata (px) for a short edge feather — NOT a wide horizontal smear
-    const distNd = new Float32Array(w * h);
-    distNd.fill(1e6);
-    const FEATHER = 6; // short kernel only
-    for (let y = 0; y < h; y++) {
-      const row = y * w;
-      let last = -1e6;
-      for (let x = 0; x < w; x++) {
-        if (isNodata[row + x]) last = x;
-        distNd[row + x] = Math.min(distNd[row + x]!, x - last);
-      }
-      last = 1e6;
-      for (let x = w - 1; x >= 0; x--) {
-        if (isNodata[row + x]) last = x;
-        distNd[row + x] = Math.min(distNd[row + x]!, last - x);
+    for (let x = 0; x < w; x++) colNodata[x]! /= h;
+
+    // Gap columns: elevated nodata (~31px MODIS barcodes at equator)
+    let medianNd = 0;
+    {
+      const sorted = Array.from(colNodata).sort((a, b) => a - b);
+      medianNd = sorted[Math.floor(sorted.length / 2)]!;
+    }
+    const gapThresh = Math.max(0.145, medianNd + 0.035);
+    const gapCol = new Uint8Array(w);
+    for (let x = 0; x < w; x++) {
+      if (colNodata[x]! >= gapThresh) gapCol[x] = 1;
+    }
+    // Soft weight around gaps for feather (not a wide ocean blur)
+    const gapW = new Float32Array(w);
+    const FEATHER = 16;
+    for (let x = 0; x < w; x++) {
+      if (!gapCol[x]) continue;
+      for (let k = Math.max(0, x - FEATHER); k <= Math.min(w - 1, x + FEATHER); k++) {
+        const dist = Math.abs(k - x) / FEATHER;
+        gapW[k] = Math.max(gapW[k]!, 1 - dist);
       }
     }
 
-    // Soft WHITE wisps into nodata only (never copy neighbor ocean luminance sideways)
+    // Prefer fair_clouds for white wispy fill; fall back to three.js cloud tex
     let wispData: Uint8ClampedArray | null = null;
-    try {
-      const wispBmp = await createImageBitmap(await (await fetch(CLOUD_TEX_FALLBACK)).blob());
-      const wc = document.createElement("canvas");
-      wc.width = w;
-      wc.height = h;
-      const wctx = wc.getContext("2d", { willReadFrequently: true })!;
-      wctx.drawImage(wispBmp, 0, 0, w, h);
-      wispBmp.close();
-      wispData = wctx.getImageData(0, 0, w, h).data;
-    } catch {
-      wispData = null;
+    for (const src of [CLOUD_TEX, CLOUD_TEX_FALLBACK]) {
+      try {
+        const wispBmp = await createImageBitmap(await (await fetch(src, { mode: "cors" })).blob());
+        const wc = document.createElement("canvas");
+        wc.width = w;
+        wc.height = h;
+        const wctx = wc.getContext("2d", { willReadFrequently: true })!;
+        wctx.drawImage(wispBmp, 0, 0, w, h);
+        wispBmp.close();
+        wispData = wctx.getImageData(0, 0, w, h).data;
+        break;
+      } catch {
+        /* try next */
+      }
+    }
+
+    function wispAlphaAt(i: number): number {
+      if (!wispData) return 120;
+      const wl =
+        0.299 * wispData[i]! + 0.587 * wispData[i + 1]! + 0.114 * wispData[i + 2]!;
+      return Math.round((wl / 255) * 230);
     }
 
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const p = y * w + x;
         const i = p << 2;
+        const gw = gapW[x]!;
+        const live = d[i + 3]!;
+
         if (isNodata[p]) {
-          let wAlpha = 90; // fallback soft haze if wisp tex missing
-          if (wispData) {
-            const wl =
-              0.299 * wispData[i]! +
-              0.587 * wispData[i + 1]! +
-              0.114 * wispData[i + 2]!;
-            wAlpha = Math.round((wl / 255) * 200);
-          }
+          // Strong white fill inside true nodata (barcode guts)
+          const wa = wispAlphaAt(i);
           d[i] = d[i + 1] = d[i + 2] = 255;
-          d[i + 3] = Math.max(40, Math.min(210, wAlpha));
+          d[i + 3] = Math.max(70, Math.min(220, Math.round(wa * (0.75 + 0.25 * Math.max(gw, 0.5)))));
           continue;
         }
-        // Short feather: ease live alpha down approaching a nodata hole so the join isn't a hard cut
-        const dn = distNd[p]!;
-        if (dn < FEATHER && d[i + 3]! > 0) {
-          const t = dn / FEATHER; // 0 at hole edge → 1 at FEATHER
-          const live = d[i + 3]!;
-          let wispA = 0;
-          if (wispData) {
-            const wl =
-              0.299 * wispData[i]! +
-              0.587 * wispData[i + 1]! +
-              0.114 * wispData[i + 2]!;
-            wispA = (wl / 255) * 160 * (1 - t);
-          }
-          d[i + 3] = Math.round(live * (0.55 + 0.45 * t) + wispA);
+
+        // Inside gap columns: also soft-fill sparse clear pixels so strip isn't half-empty
+        if (gapCol[x] && live < 55) {
+          const wa = wispAlphaAt(i);
+          const fill = Math.round(wa * 0.55 * (1 - live / 55));
+          d[i + 3] = Math.min(200, live + fill);
+          continue;
+        }
+
+        // Feather near gaps: blend a little wisp so hard barcode edges dissolve
+        if (gw > 0.05 && gw < 1 && live > 0) {
+          const wa = wispAlphaAt(i);
+          const mix = gw * 0.55;
+          d[i + 3] = Math.round(live * (1 - mix * 0.35) + wa * mix * 0.5);
         }
       }
     }
 
     ctx.putImageData(id, 0, 0);
 
-    // Tiny isotropic soften only (no directional blur)
+    // Mild isotropic soften (keeps white look, reduces speckles; no directional smear)
     const soft = document.createElement("canvas");
     soft.width = w;
     soft.height = h;
     const sctx = soft.getContext("2d")!;
-    sctx.filter = "blur(0.7px)";
+    sctx.filter = "blur(1.25px)";
     sctx.drawImage(c, 0, 0);
 
     const tex = new THREE.CanvasTexture(soft);
@@ -502,6 +535,10 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     tex.anisotropy = 8;
     tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
     tex.needsUpdate = true;
+    // Stamp build id on texture userData for runtime checks
+    (tex as THREE.Texture & { userData: Record<string, string> }).userData = {
+      liveCloudsBuild: LIVE_CLOUDS_BUILD,
+    };
     return tex;
   }
 
@@ -562,12 +599,18 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const clouds2 = new THREE.Mesh(new THREE.SphereGeometry(1.022, 64, 64), cloudMat2);
   clouds2.rotation.y = Math.random() * Math.PI * 2;
   earthGroup.add(clouds2);
-  loader.load(CLOUD_TEX_FALLBACK, (tex) => {
+  function bindClouds2(tex: THREE.Texture) {
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
     cloudMat2.map = tex;
     cloudMat2.alphaMap = tex;
+    cloudMat2.color.set(0xffffff);
+    cloudMat2.emissive.set(0xffffff);
+    cloudMat2.emissiveIntensity = 0.35;
     cloudMat2.needsUpdate = true;
+  }
+  loader.load(CLOUD_TEX, bindClouds2, undefined, () => {
+    loader.load(CLOUD_TEX_FALLBACK, bindClouds2);
   });
 
   // Fresnel atmosphere (subtle)

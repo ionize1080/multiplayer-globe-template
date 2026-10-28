@@ -406,13 +406,13 @@ function App() {
         if (cancelled) return;
         const result = await globe!.setCloudSource({
           mode: "live",
-          url: `${meta.texturePath}?d=${encodeURIComponent(meta.date)}`,
+          url: `${meta.texturePath}?d=${encodeURIComponent(meta.date)}&v=${encodeURIComponent(LIVE_CLOUDS_BUILD)}`,
           date: meta.date,
         });
         if (cancelled) return;
         if (!result.ok) throw new Error(result.error || "setCloudSource failed");
         setCloudDate(meta.date);
-        setCloudStatus(`近实时 · ${meta.date} UTC`);
+        setCloudStatus(`近实时 · ${meta.date} UTC · ${LIVE_CLOUDS_BUILD}`);
       } catch (e) {
         if (cancelled) return;
         console.warn("live clouds failed", e);
