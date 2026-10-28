@@ -438,6 +438,43 @@ a:hover {
   box-shadow: 0 0 10px rgba(251, 191, 36, 0.85);
   margin-left: 0.35rem;
 }
+.legend-dot.starlink {
+  background: #a5b4fc;
+  box-shadow: 0 0 10px rgba(165, 180, 252, 0.85);
+  margin-left: 0.35rem;
+}
+.legend-dot.sun {
+  background: #fde68a;
+  box-shadow: 0 0 12px rgba(253, 224, 71, 0.95);
+  margin-left: 0.35rem;
+}
+
+.layer-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 0.85rem;
+}
+.layer-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+.layer-toggle input {
+  accent-color: #38bdf8;
+  width: 0.95rem;
+  height: 0.95rem;
+}
+.speed-control input[type="range"]:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.starlink-card .iss-stats {
+  margin-top: 0.35rem;
+}
 
 /* .globe-ring removed — atmosphere is three.js Fresnel on earthGroup */
 

@@ -9,9 +9,11 @@ import type { OutgoingMessage } from "../shared";
 import {
   createGlobeThree,
   LIVE_CLOUDS_BUILD,
+  GLOBE_FX_BUILD,
   type CloudMode,
   type IssSnapshot,
   type LatLngMarker,
+  type StarlinkTlePair,
 } from "./globe-three";
 
 type MarketQuote = {
@@ -76,6 +78,16 @@ type CloudMetaPayload = {
   refreshedAt: string;
   lagNote: string;
 };
+
+type StarlinkStats = {
+  ok: true;
+  count: number;
+  source: string;
+  fetchedAt: string;
+  note?: string;
+};
+
+type InteractionMode = "rotate" | "drag";
 
 const CLOCKS: ClockZone[] = [
   { id: "sg", label: "SGT", city: "Singapore", timeZone: "Asia/Singapore" },
@@ -329,6 +341,29 @@ function App() {
 
   const [liveIss, setLiveIss] = useState<IssSnapshot | null>(null);
 
+  const [showIss, setShowIss] = useState(true);
+  const showIssRef = useRef(showIss);
+  useEffect(() => {
+    showIssRef.current = showIss;
+  }, [showIss]);
+
+  const [showStarlink, setShowStarlink] = useState(false);
+  const showStarlinkRef = useRef(showStarlink);
+  useEffect(() => {
+    showStarlinkRef.current = showStarlink;
+  }, [showStarlink]);
+
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>("rotate");
+  const interactionModeRef = useRef(interactionMode);
+  useEffect(() => {
+    interactionModeRef.current = interactionMode;
+  }, [interactionMode]);
+
+  const [starlinkStats, setStarlinkStats] = useState<StarlinkStats | null>(null);
+  const [starlinkError, setStarlinkError] = useState<string | null>(null);
+  const [starlinkLoading, setStarlinkLoading] = useState(false);
+  const starlinkLoadedRef = useRef(false);
+
   const positions = useRef<Map<string, LatLngMarker>>(new Map());
   const socketIdRef = useRef<string | null>(null);
 
@@ -381,6 +416,9 @@ function App() {
       getMarkers: () => [...positions.current.values()],
       getTle: () => tleRef.current,
       onIssUpdate: (iss) => setLiveIss(iss),
+      getShowIss: () => showIssRef.current,
+      getShowStarlink: () => showStarlinkRef.current,
+      getInteractionMode: () => interactionModeRef.current,
     });
     globeApiRef.current = globe;
 
@@ -454,7 +492,81 @@ function App() {
     };
   }, [cloudMode]);
 
-  const clocks = CLOCKS.map((z) => {
+  // Starlink catalog via Worker proxy — load when layer enabled (or stats refresh)
+  useEffect(() => {
+    const globe = globeApiRef.current;
+    if (!showStarlink) {
+      globe?.setStarlinkTles(null);
+      return;
+    }
+    let cancelled = false;
+    async function load() {
+      setStarlinkLoading(true);
+      setStarlinkError(null);
+      try {
+        const res = await fetch("/api/starlink?tles=1");
+        const data = (await res.json()) as
+          | (StarlinkStats & { tles: StarlinkTlePair[] })
+          | { ok: false; error?: string };
+        if (!res.ok || !("ok" in data) || data.ok !== true) {
+          throw new Error(
+            "error" in data && data.error ? String(data.error) : `starlink → ${res.status}`,
+          );
+        }
+        if (cancelled) return;
+        setStarlinkStats({
+          ok: true,
+          count: data.count,
+          source: data.source,
+          fetchedAt: data.fetchedAt,
+          note: "note" in data ? data.note : undefined,
+        });
+        globeApiRef.current?.setStarlinkTles(data.tles || []);
+        starlinkLoadedRef.current = true;
+      } catch (e) {
+        if (cancelled) return;
+        console.warn("starlink load failed", e);
+        setStarlinkError(String(e));
+        globeApiRef.current?.setStarlinkTles(null);
+      } finally {
+        if (!cancelled) setStarlinkLoading(false);
+      }
+    }
+    void load();
+    const timer = setInterval(load, 30 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [showStarlink]);
+
+  // Stats-only prefetch so panel can show count even before enabling layer
+  useEffect(() => {
+    let cancelled = false;
+    async function peek() {
+      try {
+        const res = await fetch("/api/starlink?tles=0");
+        const data = (await res.json()) as StarlinkStats | { ok: false; error?: string };
+        if (!res.ok || !("ok" in data) || data.ok !== true) return;
+        if (!cancelled) {
+          setStarlinkStats({
+            ok: true,
+            count: data.count,
+            source: data.source,
+            fetchedAt: data.fetchedAt,
+          });
+        }
+      } catch {
+        /* optional peek */
+      }
+    }
+    void peek();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+    const clocks = CLOCKS.map((z) => {
     const time = new Intl.DateTimeFormat("en-GB", {
       timeZone: z.timeZone,
       hour: "2-digit",
@@ -491,7 +603,7 @@ function App() {
           <span className="brand-mark" aria-hidden />
           <div>
             <h1>ionize.club</h1>
-            <p className="tagline">Live globe · markets · ISS orbit</p>
+            <p className="tagline">Live globe · ISS · Starlink · markets</p>
           </div>
         </div>
         <div className="live-pill" title="People currently connected">
@@ -586,7 +698,11 @@ function App() {
                   </div>
                 </div>
               </div>
-              <p className="hint">Cyan orbit · amber visitors · metallic ISS on the globe</p>
+              <p className="hint">
+                {showIss
+                  ? "Cyan orbit · TLE/SGP4 · dims when behind Earth"
+                  : "ISS layer off — enable in Controls"}
+              </p>
             </section>
           ) : (
             <section className="card error-card">
@@ -594,6 +710,47 @@ function App() {
               <p>Orbit feed offline</p>
             </section>
           )}
+
+          <section className="card starlink-card">
+            <div className="card-head">
+              <h2>Starlink</h2>
+              <span className="chip">{showStarlink ? "layer on" : "layer off"}</span>
+            </div>
+            {starlinkLoading && !starlinkStats ? (
+              <p className="hint">Loading Celestrak catalog…</p>
+            ) : starlinkStats ? (
+              <div className="iss-stats">
+                <div>
+                  <span className="muted">Catalog sats</span>
+                  <strong>{starlinkStats.count.toLocaleString()}</strong>
+                </div>
+                <div>
+                  <span className="muted">Source</span>
+                  <strong className="cap" style={{ fontSize: "0.78rem" }}>
+                    {starlinkStats.source}
+                  </strong>
+                </div>
+                <div>
+                  <span className="muted">Fetched</span>
+                  <strong>
+                    {new Intl.DateTimeFormat("en-GB", {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      hour12: false,
+                      timeZone: "Asia/Singapore",
+                    }).format(new Date(starlinkStats.fetchedAt))}{" "}
+                    SGT
+                  </strong>
+                </div>
+              </div>
+            ) : (
+              <p className="hint">Stats unavailable{starlinkError ? ` · ${starlinkError}` : ""}</p>
+            )}
+            <p className="hint">
+              Points via chunked SGP4 · toggle layer in Controls
+              {starlinkLoading ? " · updating…" : ""}
+            </p>
+          </section>
         </aside>
 
         <section className="stage">
@@ -610,11 +767,37 @@ function App() {
             </div>
           </div>
           <div className="globe-legend" aria-hidden>
-            <span className="legend-dot iss" /> ISS orbit
+            <span className="legend-dot iss" /> ISS
             <span className="legend-dot visitor" /> visitors
+            <span className="legend-dot starlink" /> Starlink
+            <span className="legend-dot sun" /> Sun
           </div>
 
           <div className="speed-control card inline-card controls-row">
+            <div className="control-block">
+              <span className="cloud-mode-label">交互模式</span>
+              <div className="segmented" role="group" aria-label="交互模式">
+                <button
+                  type="button"
+                  className={interactionMode === "rotate" ? "seg active" : "seg"}
+                  onClick={() => setInteractionMode("rotate")}
+                >
+                  自转
+                </button>
+                <button
+                  type="button"
+                  className={interactionMode === "drag" ? "seg active" : "seg"}
+                  onClick={() => setInteractionMode("drag")}
+                >
+                  拖拽
+                </button>
+              </div>
+              <p className="cloud-status" style={{ opacity: 0.75 }}>
+                {interactionMode === "drag"
+                  ? "拖拽旋转地球 · 松手有惯性 · 自转暂停"
+                  : "自动缓转 · 可调速度"}
+              </p>
+            </div>
             <div className="control-block">
               <label htmlFor="speedRange">
                 Rotation <b>{rotationSpeed.toFixed(3)}</b>
@@ -626,8 +809,30 @@ function App() {
                 max="0.03"
                 step="0.001"
                 value={rotationSpeed}
+                disabled={interactionMode === "drag"}
                 onChange={(e) => setRotationSpeed(parseFloat(e.target.value))}
               />
+            </div>
+            <div className="control-block">
+              <span className="cloud-mode-label">图层 · {GLOBE_FX_BUILD}</span>
+              <div className="layer-toggles">
+                <label className="layer-toggle">
+                  <input
+                    type="checkbox"
+                    checked={showIss}
+                    onChange={(e) => setShowIss(e.target.checked)}
+                  />
+                  <span>ISS</span>
+                </label>
+                <label className="layer-toggle">
+                  <input
+                    type="checkbox"
+                    checked={showStarlink}
+                    onChange={(e) => setShowStarlink(e.target.checked)}
+                  />
+                  <span>Starlink</span>
+                </label>
+              </div>
             </div>
             <div className="control-block">
               <label htmlFor="cloudRange">
@@ -752,7 +957,7 @@ function App() {
       <footer className="footer">
         <span>
           Powered by <a href="https://threejs.org/">three.js</a>,{" "}
-          <a href="https://npmjs.com/package/partyserver/">PartyServer</a>, Celestrak TLE,
+          <a href="https://npmjs.com/package/partyserver/">PartyServer</a>, Celestrak TLE (ISS + Starlink),
           Open-Meteo, WhereTheISS.at & Yahoo Finance · Earth: NASA Blue Marble · clouds: animated webgl-earth / near-realtime NASA GIBS true-color → cloud mask
         </span>
       </footer>

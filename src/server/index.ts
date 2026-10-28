@@ -551,6 +551,100 @@ export class Globe extends Server {
   }
 }
 
+
+const STARLINK_CACHE_TTL_MS = 30 * 60 * 1000;
+
+type StarlinkTlePair = [string, string];
+
+type StarlinkPayload = {
+  ok: true;
+  count: number;
+  source: string;
+  fetchedAt: string;
+  catalogUrl: string;
+  tles: StarlinkTlePair[];
+  note: string;
+};
+
+let starlinkCache: { at: number; data: StarlinkPayload } | null = null;
+let starlinkInflight: Promise<StarlinkPayload> | null = null;
+
+function parseStarlinkTleText(text: string): StarlinkTlePair[] {
+  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const out: StarlinkTlePair[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const a = (lines[i] || "").trim();
+    if (!a) {
+      i += 1;
+      continue;
+    }
+    // Celestrak GROUP TLE: name, L1, L2
+    if (a.startsWith("1 ") && i + 1 < lines.length) {
+      const l1 = a;
+      const l2 = (lines[i + 1] || "").trim();
+      if (l2.startsWith("2 ")) {
+        out.push([l1, l2]);
+        i += 2;
+        continue;
+      }
+    }
+    if (!a.startsWith("1 ") && !a.startsWith("2 ") && i + 2 < lines.length) {
+      const l1 = (lines[i + 1] || "").trim();
+      const l2 = (lines[i + 2] || "").trim();
+      if (l1.startsWith("1 ") && l2.startsWith("2 ")) {
+        out.push([l1, l2]);
+        i += 3;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return out;
+}
+
+async function fetchStarlinkCatalog(): Promise<StarlinkPayload> {
+  const catalogUrl =
+    "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle";
+  const res = await fetch(catalogUrl, {
+    headers: {
+      Accept: "text/plain,*/*",
+      "User-Agent": "ionize.club-globe/1.0 (educational; contact via ionize.club)",
+    },
+  });
+  if (!res.ok) throw new Error(`Celestrak Starlink → ${res.status}`);
+  const text = await res.text();
+  if (!text || text.length < 100) throw new Error("Celestrak Starlink empty body");
+  const tles = parseStarlinkTleText(text);
+  if (tles.length < 100) throw new Error(`Starlink parse too small: ${tles.length}`);
+  return {
+    ok: true,
+    count: tles.length,
+    source: "Celestrak GP · GROUP=starlink",
+    fetchedAt: new Date().toISOString(),
+    catalogUrl,
+    tles,
+    note: "Active Starlink TLEs from Celestrak; positions via client SGP4",
+  };
+}
+
+async function getStarlinkCatalog(): Promise<StarlinkPayload> {
+  const now = Date.now();
+  if (starlinkCache && now - starlinkCache.at < STARLINK_CACHE_TTL_MS) {
+    return starlinkCache.data;
+  }
+  if (starlinkInflight) return starlinkInflight;
+  starlinkInflight = fetchStarlinkCatalog()
+    .then((data) => {
+      starlinkCache = { at: Date.now(), data };
+      return data;
+    })
+    .finally(() => {
+      starlinkInflight = null;
+    });
+  return starlinkInflight;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -634,6 +728,39 @@ export default {
             "Access-Control-Allow-Origin": "*",
             "X-Cloud-Date": entry.meta.date,
             "X-Cloud-Layer": entry.meta.layer,
+          },
+        });
+      } catch (e) {
+        return Response.json(
+          { ok: false, error: String(e) },
+          {
+            status: 502,
+            headers: { "Access-Control-Allow-Origin": "*" },
+          },
+        );
+      }
+    }
+
+
+    if (request.method === "GET" && url.pathname === "/api/starlink") {
+      try {
+        const data = await getStarlinkCatalog();
+        const includeTles = url.searchParams.get("tles") !== "0";
+        const body = includeTles
+          ? data
+          : {
+              ok: true as const,
+              count: data.count,
+              source: data.source,
+              fetchedAt: data.fetchedAt,
+              catalogUrl: data.catalogUrl,
+              note: data.note,
+              tles: [] as StarlinkTlePair[],
+            };
+        return Response.json(body, {
+          headers: {
+            "Cache-Control": "public, max-age=600",
+            "Access-Control-Allow-Origin": "*",
           },
         });
       } catch (e) {

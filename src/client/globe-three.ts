@@ -31,7 +31,15 @@ type GlobeThreeOptions = {
   getMarkers: () => LatLngMarker[];
   getTle: () => [string, string] | null;
   onIssUpdate?: (iss: IssSnapshot | null) => void;
+  /** ISS model + orbit + glows (default true) */
+  getShowIss?: () => boolean;
+  /** Starlink Points cloud (default false) */
+  getShowStarlink?: () => boolean;
+  /** "rotate" = auto-spin; "drag" = pointer orbit (mutually exclusive) */
+  getInteractionMode?: () => "rotate" | "drag";
 };
+
+export type StarlinkTlePair = [string, string];
 
 const EARTH_RADIUS_KM = 6371;
 /** Dense samples for closed inertial orbit ellipse (same GMST → true closed ring) */
@@ -43,6 +51,8 @@ const CLOUD_TEX_FALLBACK =
   "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_clouds_1024.png";
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
 export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
+/** ISS far-side dim + visitor ripple markers */
+export const GLOBE_FX_BUILD = "fx3-20261028-drag-sun-starlink";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -92,6 +102,62 @@ function makeGlowSprite(size = 128) {
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
+}
+
+/** Soft bright core for visitor IP markers (replaces spheres). */
+function makeDotTexture(size = 64) {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const ctx = c.getContext("2d")!;
+  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  g.addColorStop(0, "rgba(255, 255, 255, 1)");
+  g.addColorStop(0.18, "rgba(255, 236, 200, 0.95)");
+  g.addColorStop(0.4, "rgba(251, 191, 36, 0.55)");
+  g.addColorStop(0.7, "rgba(245, 158, 11, 0.12)");
+  g.addColorStop(1, "rgba(245, 158, 11, 0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/** Thin concentric ring for expanding ripple pulses. */
+function makeRingTexture(size = 128) {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const ctx = c.getContext("2d")!;
+  const cx = size / 2;
+  const r = size * 0.38;
+  ctx.clearRect(0, 0, size, size);
+  ctx.beginPath();
+  ctx.arc(cx, cx, r, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(255, 220, 160, 0.95)";
+  ctx.lineWidth = size * 0.045;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cx, r, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(251, 146, 60, 0.35)";
+  ctx.lineWidth = size * 0.09;
+  ctx.stroke();
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/**
+ * Soft far-side dim vs camera. Earth mesh stays opaque; markers/ISS keep
+ * depthTest:false and dim so they read as faintly seen through the globe.
+ * Returns ~1 facing camera, ~0.2 when fully behind (limb soft-steps).
+ */
+function farSideBrightness(worldPos: THREE.Vector3, cameraPos: THREE.Vector3) {
+  const len = worldPos.length();
+  if (len < 1e-6) return 1;
+  const facing =
+    (worldPos.x * cameraPos.x + worldPos.y * cameraPos.y + worldPos.z * cameraPos.z) /
+    (len * (cameraPos.length() || 1));
+  const face = THREE.MathUtils.smoothstep(facing, -0.18, 0.4);
+  return 0.2 + 0.8 * face;
 }
 
 function waterToSoftRoughnessMap(waterTex: THREE.Texture) {
@@ -782,69 +848,138 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   });
   earthGroup.add(new THREE.Mesh(new THREE.SphereGeometry(1.055, 48, 48), hazeMat));
 
-  // Visitor markers
+  // Visitor markers — bright core + expanding ripple rings (not spheres)
   const markerGroup = new THREE.Group();
   earthGroup.add(markerGroup);
-  const markerGeo = new THREE.SphereGeometry(1, 12, 12);
-  const markerMatSelf = new THREE.MeshStandardMaterial({
-    color: 0xfff7ed,
-    emissive: 0xfbbf24,
-    emissiveIntensity: 0.85,
-    roughness: 0.4,
-    metalness: 0.15,
-    depthTest: false,
-    depthWrite: false,
-  });
-  const markerMatOther = new THREE.MeshStandardMaterial({
-    color: 0xfed7aa,
-    emissive: 0xf59e0b,
-    emissiveIntensity: 0.55,
-    roughness: 0.45,
-    metalness: 0.1,
-    depthTest: false,
-    depthWrite: false,
-  });
-  const markerPool: THREE.Mesh[] = [];
+  const visitorDotTex = makeDotTexture();
+  const visitorRingTex = makeRingTexture();
 
-  function hashJitter(id: string): { dLat: number; dLng: number; dAlt: number } {
+  type VisitorMarkerFx = {
+    group: THREE.Group;
+    core: THREE.Sprite;
+    ringA: THREE.Sprite;
+    ringB: THREE.Sprite;
+    phase: number;
+    self: boolean;
+  };
+  const markerPool: VisitorMarkerFx[] = [];
+
+  function makeVisitorMarker(self: boolean): VisitorMarkerFx {
+    const group = new THREE.Group();
+    group.frustumCulled = false;
+    const coreColor = self ? 0xfff7ed : 0xfbbf24;
+    const ringColor = self ? 0xfbbf24 : 0xf59e0b;
+    const core = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: visitorDotTex,
+        color: coreColor,
+        transparent: true,
+        opacity: 0.95,
+        depthTest: false,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    core.scale.setScalar(0.026);
+    core.renderOrder = 14;
+    core.frustumCulled = false;
+    const ringA = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: visitorRingTex,
+        color: ringColor,
+        transparent: true,
+        opacity: 0.55,
+        depthTest: false,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    ringA.scale.setScalar(0.03);
+    ringA.renderOrder = 13;
+    ringA.frustumCulled = false;
+    const ringB = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: visitorRingTex,
+        color: ringColor,
+        transparent: true,
+        opacity: 0.4,
+        depthTest: false,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    ringB.scale.setScalar(0.03);
+    ringB.renderOrder = 12;
+    ringB.frustumCulled = false;
+    group.add(core, ringA, ringB);
+    markerGroup.add(group);
+    // Stable phase from pool index later; temporary random
+    return { group, core, ringA, ringB, phase: Math.random() * Math.PI * 2, self };
+  }
+
+  function hashJitter(id: string): { dLat: number; dLng: number; dAlt: number; phase: number } {
     let h = 0;
     for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
     const a = ((h >>> 0) % 1000) / 1000;
     const b = (((h >>> 10) % 1000) / 1000);
-    // Spread coincident visitors (~±0.35°) so stacked same-city dots separate
+    const c = (((h >>> 20) % 1000) / 1000);
     return {
       dLat: (a - 0.5) * 0.7,
       dLng: (b - 0.5) * 0.7,
       dAlt: 14 + ((h >>> 20) % 10),
+      phase: c * Math.PI * 2,
     };
   }
 
-  function syncMarkers(list: LatLngMarker[]) {
+  const markerCamLocal = new THREE.Vector3();
+  const markerInvRoot = new THREE.Matrix4();
+
+  function syncMarkers(list: LatLngMarker[], timeMs: number) {
     while (markerPool.length < list.length) {
-      const m = new THREE.Mesh(markerGeo, markerMatOther);
-      m.renderOrder = 12;
-      m.frustumCulled = false;
-      markerPool.push(m);
-      markerGroup.add(m);
+      markerPool.push(makeVisitorMarker(false));
     }
+    // Markers live under earthGroup→root; compare local pos to camera in root space
+    markerInvRoot.copy(root.matrixWorld).invert();
+    markerCamLocal.copy(camera.position).applyMatrix4(markerInvRoot);
+
     for (let i = 0; i < markerPool.length; i++) {
-      const mesh = markerPool[i]!;
+      const fx = markerPool[i]!;
       const data = list[i];
       if (!data) {
-        mesh.visible = false;
+        fx.group.visible = false;
         continue;
       }
-      mesh.visible = true;
-      mesh.material = data.self ? markerMatSelf : markerMatOther;
-      (mesh.material as THREE.MeshStandardMaterial).depthTest = false;
-      (mesh.material as THREE.MeshStandardMaterial).depthWrite = false;
-      mesh.scale.setScalar(Math.max(0.014, Math.min(0.036, data.size * 0.28)));
+      fx.group.visible = true;
+      if (fx.self !== !!data.self) {
+        fx.self = !!data.self;
+        const coreColor = fx.self ? 0xfff7ed : 0xfbbf24;
+        const ringColor = fx.self ? 0xfbbf24 : 0xf59e0b;
+        (fx.core.material as THREE.SpriteMaterial).color.setHex(coreColor);
+        (fx.ringA.material as THREE.SpriteMaterial).color.setHex(ringColor);
+        (fx.ringB.material as THREE.SpriteMaterial).color.setHex(ringColor);
+      }
       const j = hashJitter(data.id);
-      latLngAltToVec3(data.lat + j.dLat, data.lng + j.dLng, j.dAlt, mesh.position);
+      fx.phase = j.phase;
+      latLngAltToVec3(data.lat + j.dLat, data.lng + j.dLng, j.dAlt, fx.group.position);
+
+      const bright = farSideBrightness(fx.group.position, markerCamLocal);
+      const coreSize = Math.max(0.018, Math.min(0.032, data.size * 0.22));
+      fx.core.scale.setScalar(coreSize);
+
+      // Two staggered ripples; max radius kept modest (~0.07) so they don't dominate
+      const tA = ((timeMs * 0.00045 + fx.phase) % 1 + 1) % 1;
+      const tB = ((timeMs * 0.00045 + fx.phase + 0.5) % 1 + 1) % 1;
+      const rMin = coreSize * 1.05;
+      const rMax = Math.min(0.072, coreSize * 3.2);
+      fx.ringA.scale.setScalar(rMin + (rMax - rMin) * tA);
+      fx.ringB.scale.setScalar(rMin + (rMax - rMin) * tB);
+      (fx.core.material as THREE.SpriteMaterial).opacity = (fx.self ? 0.98 : 0.88) * bright;
+      (fx.ringA.material as THREE.SpriteMaterial).opacity = (1 - tA) * 0.55 * bright;
+      (fx.ringB.material as THREE.SpriteMaterial).opacity = (1 - tB) * 0.4 * bright;
     }
   }
 
-  // Orbit — dense LineLoop, period from TLE mean motion (closes cleanly)
+    // Orbit — dense LineLoop, period from TLE mean motion (closes cleanly)
   const orbitPositions = new Float32Array(ORBIT_SAMPLES * 3);
   const orbitGeo = new THREE.BufferGeometry();
   orbitGeo.setAttribute("position", new THREE.BufferAttribute(orbitPositions, 3));
@@ -888,7 +1023,12 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         const m = mat as THREE.MeshStandardMaterial;
         m.depthTest = false;
         m.depthWrite = false;
-        if ("emissiveIntensity" in m) m.emissiveIntensity = Math.min(0.45, (m.emissiveIntensity || 0) + 0.12);
+        m.transparent = true;
+        if ("emissiveIntensity" in m) {
+          m.emissiveIntensity = Math.min(0.45, (m.emissiveIntensity || 0) + 0.12);
+          m.userData.baseEmissive = m.emissiveIntensity;
+        }
+        m.userData.baseOpacity = m.opacity ?? 1;
       }
       mesh.renderOrder = 20;
     }
@@ -928,6 +1068,109 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   issCyanGlow.renderOrder = 18;
   issCyanGlow.frustumCulled = false;
   earthGroup.add(issCyanGlow);
+
+  const ISS_GLOW_OPACITY = 0.7;
+  const ISS_CYAN_OPACITY = 0.55;
+  (issGlow.material as THREE.SpriteMaterial).opacity = ISS_GLOW_OPACITY;
+  (issCyanGlow.material as THREE.SpriteMaterial).opacity = ISS_CYAN_OPACITY;
+
+  // --- Starlink constellation as Points (chunked SGP4, no heavy meshes) ---
+  const STARLINK_CHUNK = 280;
+  const STARLINK_REFRESH_MS = 12_000;
+  const STARLINK_ALT_FALLBACK_KM = 550;
+  let starlinkSatrecs: satellite.SatRec[] = [];
+  let starlinkPropCursor = 0;
+  let starlinkPropActive = false;
+  let starlinkLastFull = 0;
+  let starlinkCount = 0;
+  const starlinkPositions = new Float32Array(3); // replaced on catalog load
+  let starlinkPosAttr = new THREE.BufferAttribute(starlinkPositions, 3);
+  const starlinkGeo = new THREE.BufferGeometry();
+  starlinkGeo.setAttribute("position", starlinkPosAttr);
+  const starlinkMat = new THREE.PointsMaterial({
+    color: 0xa5b4fc,
+    size: 0.011,
+    transparent: true,
+    opacity: 0.78,
+    depthTest: true,
+    depthWrite: false,
+    sizeAttenuation: true,
+  });
+  const starlinkPoints = new THREE.Points(starlinkGeo, starlinkMat);
+  starlinkPoints.frustumCulled = false;
+  starlinkPoints.renderOrder = 8;
+  starlinkPoints.visible = false;
+  earthGroup.add(starlinkPoints);
+
+  function setStarlinkTles(tles: StarlinkTlePair[] | null) {
+    starlinkSatrecs = [];
+    if (!tles || !tles.length) {
+      starlinkCount = 0;
+      starlinkPoints.visible = false;
+      starlinkGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(3), 3));
+      return;
+    }
+    const recs: satellite.SatRec[] = [];
+    for (const pair of tles) {
+      try {
+        const rec = satellite.twoline2satrec(pair[0], pair[1]);
+        if (rec) recs.push(rec);
+      } catch {
+        /* skip bad TLE */
+      }
+    }
+    starlinkSatrecs = recs;
+    starlinkCount = recs.length;
+    const buf = new Float32Array(Math.max(1, recs.length) * 3);
+    // Park unused at origin until first prop
+    starlinkPosAttr = new THREE.BufferAttribute(buf, 3);
+    starlinkPosAttr.setUsage(THREE.DynamicDrawUsage);
+    starlinkGeo.setAttribute("position", starlinkPosAttr);
+    starlinkGeo.setDrawRange(0, recs.length);
+    starlinkPropCursor = 0;
+    starlinkPropActive = true;
+    starlinkLastFull = 0;
+  }
+
+  function tickStarlink(now: Date, time: number, show: boolean) {
+    if (!show || starlinkCount === 0) {
+      starlinkPoints.visible = false;
+      return;
+    }
+    starlinkPoints.visible = true;
+    if (!starlinkPropActive && (time - starlinkLastFull > STARLINK_REFRESH_MS || starlinkLastFull === 0)) {
+      starlinkPropActive = true;
+      starlinkPropCursor = 0;
+    }
+    if (!starlinkPropActive) return;
+    const arr = starlinkPosAttr.array as Float32Array;
+    const end = Math.min(starlinkPropCursor + STARLINK_CHUNK, starlinkCount);
+    for (let i = starlinkPropCursor; i < end; i++) {
+      const rec = starlinkSatrecs[i]!;
+      const pv = satellite.propagate(rec, now);
+      let lat = 0;
+      let lng = 0;
+      let alt = STARLINK_ALT_FALLBACK_KM;
+      if (pv && pv.position && typeof pv.position !== "boolean") {
+        const gmst = satellite.gstime(now);
+        const gd = satellite.eciToGeodetic(pv.position as satellite.EciVec3<number>, gmst);
+        lat = satellite.degreesLat(gd.latitude);
+        lng = satellite.degreesLong(gd.longitude);
+        alt = (gd.height || 0) > 50 ? gd.height : STARLINK_ALT_FALLBACK_KM;
+      }
+      latLngAltToVec3(lat, lng, alt, tmp);
+      const o = i * 3;
+      arr[o] = tmp.x;
+      arr[o + 1] = tmp.y;
+      arr[o + 2] = tmp.z;
+    }
+    starlinkPropCursor = end;
+    if (starlinkPropCursor >= starlinkCount) {
+      starlinkPosAttr.needsUpdate = true;
+      starlinkPropActive = false;
+      starlinkLastFull = time;
+    }
+  }
 
   let satrec: satellite.SatRec | null = null;
   let lastTleKey = "";
@@ -1088,16 +1331,208 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => resize()) : null;
   ro?.observe(canvas.parentElement ?? canvas);
 
+  // --- Sun marker (world-fixed, readable like satellitemap; Earth spins under it) ---
+  function makeSunTexture(size = 96) {
+    const c = document.createElement("canvas");
+    c.width = c.height = size;
+    const ctx = c.getContext("2d")!;
+    const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    g.addColorStop(0, "rgba(255, 255, 240, 1)");
+    g.addColorStop(0.25, "rgba(253, 224, 71, 0.95)");
+    g.addColorStop(0.55, "rgba(251, 146, 60, 0.45)");
+    g.addColorStop(1, "rgba(251, 146, 60, 0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, size);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+  const sunTex = makeSunTexture();
+  const sunSprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: sunTex,
+      color: 0xfde68a,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  sunSprite.scale.setScalar(0.22);
+  sunSprite.renderOrder = 30;
+  sunSprite.frustumCulled = false;
+  scene.add(sunSprite); // world space — not under root
+  const sunBeam = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: sunTex,
+      color: 0xfbbf24,
+      transparent: true,
+      opacity: 0.35,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  sunBeam.scale.setScalar(0.42);
+  sunBeam.renderOrder = 29;
+  sunBeam.frustumCulled = false;
+  scene.add(sunBeam);
+
+  // --- Drag vs rotate interaction (OrbitControls-style; don't fight auto-spin) ---
+  let interactionMode: "rotate" | "drag" = "rotate";
+  let dragPointerId: number | null = null;
+  let dragLastX = 0;
+  let dragLastY = 0;
+  let dragVelY = 0;
+  let dragVelX = 0;
+  let dragTheta = 0; // yaw around Y
+  let dragPhi = 0.18; // tilt around X (matches prior root.rotation.x)
+  const DRAG_PHI_MIN = -0.85;
+  const DRAG_PHI_MAX = 0.95;
+  const DRAG_SENS = 0.0055;
+  const DRAG_INERTIA = 0.92;
+
+  function applyInteractionMode(mode: "rotate" | "drag") {
+    interactionMode = mode;
+    if (mode === "drag") {
+      // Seed drag angles from current auto-spin pose so switch is seamless
+      dragTheta = phi;
+      dragPhi = root.rotation.x || 0.18;
+      dragVelX = 0;
+      dragVelY = 0;
+      canvas.style.cursor = "grab";
+    } else {
+      phi = dragTheta;
+      canvas.style.cursor = "";
+    }
+  }
+
+  function onPointerDown(e: PointerEvent) {
+    if ((opts.getInteractionMode?.() ?? "rotate") !== "drag") return;
+    if (e.button !== 0) return;
+    dragPointerId = e.pointerId;
+    dragLastX = e.clientX;
+    dragLastY = e.clientY;
+    dragVelX = 0;
+    dragVelY = 0;
+    canvas.setPointerCapture(e.pointerId);
+    canvas.style.cursor = "grabbing";
+    e.preventDefault();
+  }
+  function onPointerMove(e: PointerEvent) {
+    if (dragPointerId !== e.pointerId) return;
+    const dx = e.clientX - dragLastX;
+    const dy = e.clientY - dragLastY;
+    dragLastX = e.clientX;
+    dragLastY = e.clientY;
+    dragTheta += dx * DRAG_SENS;
+    dragPhi = Math.min(DRAG_PHI_MAX, Math.max(DRAG_PHI_MIN, dragPhi + dy * DRAG_SENS));
+    dragVelY = dx * DRAG_SENS;
+    dragVelX = dy * DRAG_SENS;
+  }
+  function onPointerUp(e: PointerEvent) {
+    if (dragPointerId !== e.pointerId) return;
+    dragPointerId = null;
+    try {
+      canvas.releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    if ((opts.getInteractionMode?.() ?? "rotate") === "drag") canvas.style.cursor = "grab";
+  }
+  canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.addEventListener("pointermove", onPointerMove);
+  canvas.addEventListener("pointerup", onPointerUp);
+  canvas.addEventListener("pointercancel", onPointerUp);
+  canvas.addEventListener("pointerleave", onPointerUp);
+
+  // Stable ISS orientation — avoid lookAt singularity when velocity ‖ radial
+  const issQuat = new THREE.Quaternion();
+  const issTargetQuat = new THREE.Quaternion();
+  const issXAxis = new THREE.Vector3();
+  const issYAxis = new THREE.Vector3();
+  const issZAxis = new THREE.Vector3();
+  const issMat = new THREE.Matrix4();
+  let issOrientInit = false;
+
+  function orientIss(pos: THREE.Vector3, aheadPos: THREE.Vector3) {
+    // Z = velocity / forward along track; Y = radial outward (nadir-up for station);
+    // X = Y × Z. If nearly parallel, fall back to world-north projection.
+    issZAxis.subVectors(aheadPos, pos);
+    if (issZAxis.lengthSq() < 1e-10) return;
+    issZAxis.normalize();
+    issYAxis.copy(pos).normalize();
+    issXAxis.crossVectors(issYAxis, issZAxis);
+    if (issXAxis.lengthSq() < 1e-8) {
+      // Singularity: use world +Y projected
+      tmp2.set(0, 1, 0);
+      issXAxis.crossVectors(tmp2, issZAxis);
+      if (issXAxis.lengthSq() < 1e-8) {
+        tmp2.set(1, 0, 0);
+        issXAxis.crossVectors(tmp2, issZAxis);
+      }
+    }
+    issXAxis.normalize();
+    issYAxis.crossVectors(issZAxis, issXAxis).normalize();
+    issMat.makeBasis(issXAxis, issYAxis, issZAxis);
+    issTargetQuat.setFromRotationMatrix(issMat);
+    if (!issOrientInit) {
+      issQuat.copy(issTargetQuat);
+      issOrientInit = true;
+    } else {
+      // Shortest-arc slerp; damp flips
+      if (issQuat.dot(issTargetQuat) < 0) {
+        issTargetQuat.x *= -1;
+        issTargetQuat.y *= -1;
+        issTargetQuat.z *= -1;
+        issTargetQuat.w *= -1;
+      }
+      issQuat.slerp(issTargetQuat, 0.18);
+    }
+    iss.quaternion.copy(issQuat);
+  }
+
+  function applyIssDim(bright: number) {
+    iss.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.material) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const mat of mats) {
+        const m = mat as THREE.MeshStandardMaterial;
+        if (typeof m.userData.baseEmissive === "number") {
+          m.emissiveIntensity = m.userData.baseEmissive * bright;
+        }
+        if (typeof m.userData.baseOpacity === "number") {
+          m.opacity = Math.max(0.22, m.userData.baseOpacity * (0.25 + 0.75 * bright));
+        }
+      }
+    });
+    (issGlow.material as THREE.SpriteMaterial).opacity = ISS_GLOW_OPACITY * bright;
+    (issCyanGlow.material as THREE.SpriteMaterial).opacity = ISS_CYAN_OPACITY * bright;
+  }
+
   function frame(time: number) {
     if (!running) return;
     raf = requestAnimationFrame(frame);
 
-    syncMarkers(opts.getMarkers());
+    const mode = opts.getInteractionMode?.() ?? "rotate";
+    if (mode !== interactionMode) applyInteractionMode(mode);
+
+    const showIss = opts.getShowIss?.() ?? true;
+    const showStarlink = opts.getShowStarlink?.() ?? false;
+
     const now = new Date();
     updateSun(now);
+    // Sun glyph sits just outside Earth limb along fixed sun direction
+    sunSprite.position.copy(FIXED_SUN).multiplyScalar(1.28);
+    sunBeam.position.copy(FIXED_SUN).multiplyScalar(1.22);
+    const sunPulse = 0.5 + 0.5 * Math.sin(time * 0.002);
+    sunSprite.scale.setScalar(0.2 + 0.04 * sunPulse);
+    sunBeam.scale.setScalar(0.38 + 0.06 * sunPulse);
 
-    // Orbit rebuild whenever TLE is available (not gated on current prop success)
-    if (ensureSatrec() && (time - lastOrbitBuild > 20_000 || lastOrbitBuild === 0)) {
+    // Orbit rebuild whenever TLE is available
+    if (showIss && ensureSatrec() && (time - lastOrbitBuild > 20_000 || lastOrbitBuild === 0)) {
       try {
         rebuildOrbit(now);
         lastOrbitBuild = time;
@@ -1105,10 +1540,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         console.warn("rebuildOrbit failed", err);
       }
     }
-    orbitLine.visible = orbitReady;
-    orbitGlow.visible = orbitReady;
 
-    const p = propagate(now);
+    const p = showIss ? propagate(now) : null;
     if (p) {
       latLngAltToVec3(p.latitude, p.longitude, p.altitude, iss.position);
       issGlow.position.copy(iss.position);
@@ -1117,14 +1550,18 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       const ahead = propagate(new Date(now.getTime() + 20_000));
       if (ahead) {
         latLngAltToVec3(ahead.latitude, ahead.longitude, ahead.altitude, tmp);
-        iss.up.copy(iss.position).normalize();
-        iss.lookAt(tmp);
-        iss.rotateX(Math.PI / 2);
+        orientIss(iss.position, tmp);
       }
 
+      // Far-side dim (Earth stays opaque; ISS faintly "through" globe)
+      root.updateMatrixWorld(true);
+      iss.getWorldPosition(tmp2);
+      const issBright = farSideBrightness(tmp2, camera.position);
+      applyIssDim(issBright);
+
       const issPulse = 0.5 + 0.5 * Math.sin(time * 0.004);
-      issGlow.scale.setScalar(0.16 + 0.04 * issPulse);
-      issCyanGlow.scale.setScalar(0.24 + 0.06 * issPulse);
+      issGlow.scale.setScalar((0.16 + 0.04 * issPulse) * (0.55 + 0.45 * issBright));
+      issCyanGlow.scale.setScalar((0.24 + 0.06 * issPulse) * (0.55 + 0.45 * issBright));
 
       if (time - lastIssEmit > 1000) {
         lastIssEmit = time;
@@ -1138,20 +1575,28 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       iss.visible = true;
       issGlow.visible = true;
       issCyanGlow.visible = true;
+      orbitLine.visible = orbitReady;
+      orbitGlow.visible = orbitReady;
     } else {
-      // Keep ISS visible at last position if orbit already built (transient prop miss);
-      // only hide when we never had a TLE orbit.
-      if (!orbitReady) {
+      if (!orbitReady || !showIss) {
         iss.visible = false;
         issGlow.visible = false;
         issCyanGlow.visible = false;
       }
-      if (time - lastIssEmit > 2000) {
+      orbitLine.visible = showIss && orbitReady;
+      orbitGlow.visible = showIss && orbitReady;
+      if (!showIss) {
+        iss.visible = false;
+        issGlow.visible = false;
+        issCyanGlow.visible = false;
+      }
+      if (showIss && time - lastIssEmit > 2000) {
         lastIssEmit = time;
-        // Don't clear panel permanently — parent retries TLE; keep last snapshot if any
         opts.onIssUpdate?.(null);
       }
     }
+
+    tickStarlink(now, time, showStarlink);
 
     applyCloudAmount(opts.getCloudAmount());
     clouds.rotation.y += cloudDrift;
@@ -1159,9 +1604,27 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     cloudShadow.rotation.y = clouds.rotation.y;
     cloudShadow.rotation.z = clouds.rotation.z;
 
-    phi += opts.getRotationSpeed();
-    root.rotation.y = phi;
-    root.rotation.x = 0.18;
+    if (interactionMode === "drag") {
+      if (dragPointerId == null) {
+        // Light inertia after release
+        dragTheta += dragVelY;
+        dragPhi = Math.min(DRAG_PHI_MAX, Math.max(DRAG_PHI_MIN, dragPhi + dragVelX));
+        dragVelY *= DRAG_INERTIA;
+        dragVelX *= DRAG_INERTIA;
+        if (Math.abs(dragVelY) < 1e-5) dragVelY = 0;
+        if (Math.abs(dragVelX) < 1e-5) dragVelX = 0;
+      }
+      root.rotation.y = dragTheta;
+      root.rotation.x = dragPhi;
+      phi = dragTheta;
+    } else {
+      phi += opts.getRotationSpeed();
+      root.rotation.y = phi;
+      root.rotation.x = 0.18;
+    }
+
+    root.updateMatrixWorld(true);
+    syncMarkers(opts.getMarkers(), time);
 
     const pulse = 0.012 * Math.sin(time * 0.001);
     atmosUniforms.uPulse.value = pulse;
@@ -1177,15 +1640,29 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       cancelAnimationFrame(raf);
       liveLoadToken += 1;
       window.removeEventListener("resize", onResize);
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      canvas.removeEventListener("pointermove", onPointerMove);
+      canvas.removeEventListener("pointerup", onPointerUp);
+      canvas.removeEventListener("pointercancel", onPointerUp);
+      canvas.removeEventListener("pointerleave", onPointerUp);
       ro?.disconnect();
       orbitGeo.dispose();
       orbitGlowGeo.dispose();
       earthGeo.dispose();
       earthMat.dispose();
-      markerGeo.dispose();
-      markerMatSelf.dispose();
-      markerMatOther.dispose();
+      for (const fx of markerPool) {
+        (fx.core.material as THREE.SpriteMaterial).dispose();
+        (fx.ringA.material as THREE.SpriteMaterial).dispose();
+        (fx.ringB.material as THREE.SpriteMaterial).dispose();
+      }
+      visitorDotTex.dispose();
+      visitorRingTex.dispose();
       issGlowTex.dispose();
+      sunTex.dispose();
+      (sunSprite.material as THREE.SpriteMaterial).dispose();
+      (sunBeam.material as THREE.SpriteMaterial).dispose();
+      starlinkGeo.dispose();
+      starlinkMat.dispose();
       liveCloudTex?.dispose();
       cloudMat.dispose();
       cloudMat2.dispose();
@@ -1194,5 +1671,6 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     },
     resize,
     setCloudSource,
+    setStarlinkTles,
   };
 }
