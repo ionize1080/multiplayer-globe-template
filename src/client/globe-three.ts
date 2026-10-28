@@ -335,20 +335,21 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const a = Math.min(1, Math.max(0, amount));
     const on = a > 0.02 && (cloudsReady || !!cloudMat.map);
     clouds.visible = on;
-    // Animated wisps: full in animated mode; light fill in live mode for no-data / night gaps
+    // Live mode: keep a clearly visible wispy shell so orbital gaps aren't bald
     clouds2.visible = on;
     cloudShadow.visible = on;
     cloudMat.opacity = 0.12 + a * 0.58; // 0.12..0.70 (R3: less veil over city lights)
     cloudMat2.opacity =
       cloudMode === "live"
-        ? 0.03 + a * 0.14 // soft fill so bald hemispheres aren't empty
+        ? 0.14 + a * 0.28 // was ~0.03–0.17 — too faint for Aura to see
         : 0.04 + a * 0.32; // 0.04..0.36
-    cloudShadowMat.opacity = a * (cloudMode === "live" ? 0.22 : 0.32);
+    cloudShadowMat.opacity = a * (cloudMode === "live" ? 0.18 : 0.32);
   }
 
   /**
    * NASA true-color mosaic → white clouds + transparent clear sky.
-   * Rejects empty / colorbar / near-blank maps (P0 coverage gate).
+   * Aggressively inpaints orbital swath gaps and bakes wispy fill (Aura P0).
+   * Rejects empty / colorbar / near-blank maps (coverage gate).
    */
   async function trueColorToCloudMask(url: string): Promise<THREE.CanvasTexture> {
     const res = await fetch(url);
@@ -368,43 +369,46 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     bmp.close();
     const id = ctx.getImageData(0, 0, w, h);
     const d = id.data;
-    const colCov = new Float32Array(w);
+    const colNodata = new Float32Array(w);
+    const colMeanA = new Float32Array(w);
+    const isNodata = new Uint8Array(w * h);
     let opaqueN = 0;
     let nodataN = 0;
     const total = w * h;
 
-    for (let i = 0, px = 0; i < d.length; i += 4, px++) {
-      const r = d[i]!;
-      const g = d[i + 1]!;
-      const b = d[i + 2]!;
-      const aIn = d[i + 3]!;
-      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-      const mx = Math.max(r, g, b);
-      const mn = Math.min(r, g, b);
-      const sat = mx > 1 ? (mx - mn) / mx : 0;
-      const x = px % w;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) << 2;
+        const r = d[i]!;
+        const g = d[i + 1]!;
+        const b = d[i + 2]!;
+        const aIn = d[i + 3]!;
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        const mx = Math.max(r, g, b);
+        const mn = Math.min(r, g, b);
+        const sat = mx > 1 ? (mx - mn) / mx : 0;
 
-      // Missing swath / night gap in daytime mosaic
-      const nodata = aIn < 8 || lum < 8;
-      if (nodata) {
-        nodataN++;
-        d[i] = d[i + 1] = d[i + 2] = 0;
-        d[i + 3] = 0;
-        continue;
-      }
+        const nodata = aIn < 8 || lum < 8;
+        if (nodata) {
+          nodataN++;
+          isNodata[y * w + x] = 1;
+          colNodata[x]! += 1;
+          d[i] = d[i + 1] = d[i + 2] = 255;
+          d[i + 3] = 0;
+          continue;
+        }
 
-      // Warm bright desert sand → suppress; ice/cloud stay
-      const warm = r - b > 28 && r > 135;
-      let score = Math.min(1, Math.max(0, (lum - 95) / 90)) * Math.min(1, Math.max(0, 1.15 - sat * 2.1));
-      if (warm) score *= 0.22;
-      // Mild lift so thin cirrus reads
-      score = Math.min(1, score * 1.12);
-      const alpha = score < 0.06 ? 0 : Math.round(score * 255);
-      d[i] = d[i + 1] = d[i + 2] = 255;
-      d[i + 3] = alpha;
-      if (alpha > 20) {
-        opaqueN++;
-        colCov[x]! += 1;
+        const warm = r - b > 28 && r > 135;
+        let score =
+          Math.min(1, Math.max(0, (lum - 95) / 90)) *
+          Math.min(1, Math.max(0, 1.15 - sat * 2.1));
+        if (warm) score *= 0.22;
+        score = Math.min(1, score * 1.12);
+        const alpha = score < 0.06 ? 0 : Math.round(score * 255);
+        d[i] = d[i + 1] = d[i + 2] = 255;
+        d[i + 3] = alpha;
+        colMeanA[x]! += alpha;
+        if (alpha > 20) opaqueN++;
       }
     }
 
@@ -420,35 +424,162 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       throw new Error(`live cloud mosaic too incomplete (nodata ${(nodataRatio * 100).toFixed(0)}%)`);
     }
 
-    // Feather hard vertical mosaic / swath edges (Aura P0)
-    for (let x = 0; x < w; x++) colCov[x]! /= h;
-    const edgeW = new Float32Array(w);
-    edgeW.fill(1);
-    for (let x = 1; x < w - 1; x++) {
-      const jump = Math.abs(colCov[x]! - colCov[x - 1]!) + Math.abs(colCov[x]! - colCov[x + 1]!);
-      if (jump > 0.12) {
-        for (let k = Math.max(0, x - 14); k <= Math.min(w - 1, x + 14); k++) {
-          const dist = Math.abs(k - x) / 14;
-          edgeW[k] = Math.min(edgeW[k]!, 0.12 + 0.88 * dist);
+    for (let x = 0; x < w; x++) {
+      colNodata[x]! /= h;
+      colMeanA[x]! /= h;
+    }
+
+    // Detect orbital swath-gap columns (~50px bands; typically ~17% nodata vs ~10% elsewhere)
+    let medianNd = 0;
+    {
+      const sorted = Array.from(colNodata).sort((a, b) => a - b);
+      medianNd = sorted[Math.floor(sorted.length / 2)]!;
+    }
+    const gapCol = new Uint8Array(w);
+    const gapThresh = Math.max(0.145, medianNd + 0.035);
+    for (let x = 0; x < w; x++) {
+      if (colNodata[x]! >= gapThresh) gapCol[x] = 1;
+    }
+    // Dilate gaps so we treat edges as part of the seam zone
+    const gapZone = new Float32Array(w);
+    const SEAM_RADIUS = 18;
+    for (let x = 0; x < w; x++) {
+      if (!gapCol[x]) continue;
+      for (let k = Math.max(0, x - SEAM_RADIUS); k <= Math.min(w - 1, x + SEAM_RADIUS); k++) {
+        const dist = Math.abs(k - x) / SEAM_RADIUS;
+        gapZone[k] = Math.max(gapZone[k]!, 1 - dist);
+      }
+    }
+
+    // Horizontal inpaint (O(w·h) two-pass): fill nodata / empty from nearest valid neighbors
+    const alphaBuf = new Float32Array(w * h);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) alphaBuf[p] = d[i + 3]!;
+
+    const leftA = new Float32Array(w * h);
+    const leftX = new Int32Array(w * h);
+    const rightA = new Float32Array(w * h);
+    const rightX = new Int32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      let lastA = 0;
+      let lastX = -1;
+      for (let x = 0; x < w; x++) {
+        const p = row + x;
+        const valid = alphaBuf[p]! > 12 && !isNodata[p];
+        if (valid) {
+          lastA = alphaBuf[p]!;
+          lastX = x;
+        }
+        leftA[p] = lastA;
+        leftX[p] = lastX;
+      }
+      lastA = 0;
+      lastX = -1;
+      for (let x = w - 1; x >= 0; x--) {
+        const p = row + x;
+        const valid = alphaBuf[p]! > 12 && !isNodata[p];
+        if (valid) {
+          lastA = alphaBuf[p]!;
+          lastX = x;
+        }
+        rightA[p] = lastA;
+        rightX[p] = lastX;
+      }
+      // Dilate nodata ~2px horizontally (copy-buffer — avoid cascade fill)
+      const rowNd = new Uint8Array(w);
+      for (let x = 0; x < w; x++) {
+        if (!isNodata[row + x]) continue;
+        for (let k = Math.max(0, x - 2); k <= Math.min(w - 1, x + 2); k++) {
+          rowNd[k] = 1;
+          isNodata[row + k] = 1;
+        }
+      }
+      for (let x = 0; x < w; x++) {
+        const p = row + x;
+        const gz = gapZone[x]!;
+        // Only fill true nodata holes / seam zone empties — never clear-sky ocean
+        if (!rowNd[x] && !(gz > 0.45 && alphaBuf[p]! < 8)) continue;
+        const lx = leftX[p]!;
+        const rx = rightX[p]!;
+        let fill = 0;
+        if (lx >= 0 && rx >= 0 && rx !== lx) {
+          const t = (x - lx) / Math.max(1, rx - lx);
+          fill = (1 - t) * leftA[p]! + t * rightA[p]!;
+        } else if (lx >= 0) {
+          fill = leftA[p]! * 0.9;
+        } else if (rx >= 0) {
+          fill = rightA[p]! * 0.9;
+        }
+        const boost = 0.7 + 0.35 * Math.max(gz, 0.5);
+        alphaBuf[p] = Math.max(alphaBuf[p]!, fill * boost);
+      }
+    }
+
+    // Bake decorative wisps into gap / low-alpha regions (Aura: fill must be visible)
+    let wisp: ImageData | null = null;
+    try {
+      const wispBmp = await createImageBitmap(await (await fetch(CLOUD_TEX_FALLBACK)).blob());
+      const wc = document.createElement("canvas");
+      wc.width = w;
+      wc.height = h;
+      const wctx = wc.getContext("2d", { willReadFrequently: true })!;
+      wctx.drawImage(wispBmp, 0, 0, w, h);
+      wispBmp.close();
+      wisp = wctx.getImageData(0, 0, w, h);
+    } catch {
+      wisp = null;
+    }
+    if (wisp) {
+      const wd = wisp.data;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const p = y * w + x;
+          // Only paint wisps into nodata holes (and dilated seam holes), not clear ocean
+          if (!isNodata[p]) continue;
+          const gz = gapZone[x]!;
+          const wi = p << 2;
+          const wl =
+            0.299 * wd[wi]! + 0.587 * wd[wi + 1]! + 0.114 * wd[wi + 2]!;
+          const wAlpha = (wl / 255) * (0.5 + 0.45 * Math.max(gz, 0.65));
+          alphaBuf[p] = Math.max(alphaBuf[p]!, wAlpha * 230);
         }
       }
     }
-    // Also fade into nodata: soft multiply already-zero stays zero
+
+    // Wide horizontal blur weighted by gap zone (obvious soft seams, not 1px)
+    const blurred = new Float32Array(alphaBuf.length);
+    const BLUR_R = 26;
     for (let y = 0; y < h; y++) {
+      const row = y * w;
+      // prefix sums for fast box blur
+      const prefix = new Float32Array(w + 1);
+      for (let x = 0; x < w; x++) prefix[x + 1] = prefix[x]! + alphaBuf[row + x]!;
       for (let x = 0; x < w; x++) {
-        const i = (y * w + x) << 2;
-        d[i + 3] = Math.round(d[i + 3]! * edgeW[x]!);
+        const lo = Math.max(0, x - BLUR_R);
+        const hi = Math.min(w - 1, x + BLUR_R);
+        blurred[row + x] = (prefix[hi + 1]! - prefix[lo]!) / (hi - lo + 1);
       }
+    }
+    for (let p = 0; p < alphaBuf.length; p++) {
+      const x = p % w;
+      const m = Math.min(1, gapZone[x]! * 1.15);
+      alphaBuf[p] = alphaBuf[p]! * (1 - m) + blurred[p]! * m;
+    }
+
+    // Write back white RGB + alpha
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+      d[i] = d[i + 1] = d[i + 2] = 255;
+      d[i + 3] = Math.max(0, Math.min(255, Math.round(alphaBuf[p]!)));
     }
 
     ctx.putImageData(id, 0, 0);
 
-    // Soften speckles / hard seams (P1) via GPU canvas blur
+    // Final mild isotropic soften
     const soft = document.createElement("canvas");
     soft.width = w;
     soft.height = h;
     const sctx = soft.getContext("2d")!;
-    sctx.filter = "blur(1.1px)";
+    sctx.filter = "blur(1.6px)";
     sctx.drawImage(c, 0, 0);
 
     const tex = new THREE.CanvasTexture(soft);
@@ -484,8 +615,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       liveCloudTex = tex;
       cloudMode = "live";
       cloudDrift = 0;
-      // Keep a whisper of wispy drift for no-data fill (Aura P0)
-      cloudDrift2 = cloudDrift2Base * 0.45;
+      // Keep visible wispy drift so gap fill doesn't look frozen/static
+      cloudDrift2 = cloudDrift2Base * 0.85;
       // Align equirectangular mosaic with Blue Marble (no decorative drift offset)
       clouds.rotation.y = 0;
       clouds.rotation.z = 0;
