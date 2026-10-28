@@ -640,20 +640,50 @@ async function fetchStarlinkCatalog(): Promise<StarlinkPayload> {
   if (starlinkCache?.data) {
     return {
       ...starlinkCache.data,
-      fetchedAt: starlinkCache.data.fetchedAt,
       note: `${starlinkCache.data.note} (stale cache; upstream: ${String(lastErr)})`,
     };
   }
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-async function getStarlinkCatalog(): Promise<StarlinkPayload> {
+async function fetchStarlinkSampleAsset(origin: string): Promise<StarlinkPayload> {
+  const catalogUrl = new URL("/starlink-sample.tle", origin).toString();
+  const res = await fetch(catalogUrl);
+  if (!res.ok) throw new Error(`starlink-sample.tle → ${res.status}`);
+  const text = await res.text();
+  const tles = parseStarlinkTleText(text);
+  if (tles.length < 50) throw new Error(`starlink-sample too small: ${tles.length}`);
+  return {
+    ok: true,
+    count: tles.length,
+    source: "Bundled sample · starlink-sample.tle (Celestrak snapshot)",
+    fetchedAt: new Date().toISOString(),
+    catalogUrl,
+    tles,
+    note: "Fallback sample when Celestrak unreachable from Worker; thinned snapshot",
+  };
+}
+
+async function getStarlinkCatalog(origin?: string): Promise<StarlinkPayload> {
   const now = Date.now();
   if (starlinkCache && now - starlinkCache.at < STARLINK_CACHE_TTL_MS) {
     return starlinkCache.data;
   }
   if (starlinkInflight) return starlinkInflight;
-  starlinkInflight = fetchStarlinkCatalog()
+  starlinkInflight = (async () => {
+    try {
+      return await fetchStarlinkCatalog();
+    } catch (e) {
+      if (origin) {
+        try {
+          return await fetchStarlinkSampleAsset(origin);
+        } catch (e2) {
+          throw e;
+        }
+      }
+      throw e;
+    }
+  })()
     .then((data) => {
       starlinkCache = { at: Date.now(), data };
       return data;
@@ -763,7 +793,7 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/api/starlink") {
       try {
-        const data = await getStarlinkCatalog();
+        const data = await getStarlinkCatalog(url.origin);
         const includeTles = url.searchParams.get("tles") !== "0";
         const maxRaw = Number(url.searchParams.get("max") || "2200");
         const max = Number.isFinite(maxRaw)
