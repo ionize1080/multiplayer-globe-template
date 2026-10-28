@@ -110,7 +110,7 @@ const CLOUD_TEX_FALLBACK =
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
 export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 /** ISS far-side dim + visitor ripple markers */
-export const GLOBE_FX_BUILD = "fx7-20261028-sun-depth";
+export const GLOBE_FX_BUILD = "fx7b-20261028-sun-rotate-reset";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -1509,16 +1509,20 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   function applyInteractionMode(mode: "rotate" | "drag") {
     const prev = interactionMode;
     interactionMode = mode;
-    // Do NOT reseeds angles from root — viewTheta/viewPhi already persist
     dragVelX = 0;
     dragVelY = 0;
     if (mode === "drag") {
       canvas.style.cursor = "grab";
     } else {
       canvas.style.cursor = "";
-      // Optional: ease tilt toward default when entering auto-spin (not a hard snap of yaw)
+      // Drag → rotate: active reset to default spin pose (user t101u).
+      // Re-frame sun on RIGHT limb from live sunDir; clear skewed drag tilt.
       if (prev === "drag") {
-        /* keep viewPhi; rotate mode will gently lerp toward ROTATE_PHI */
+        dragPointerId = null;
+        viewTheta = 0;
+        viewPhi = ROTATE_PHI;
+        frameSunToRightLimb(); // camYaw from liveSun; persists pose
+        applyCameraYaw();
       }
     }
   }
