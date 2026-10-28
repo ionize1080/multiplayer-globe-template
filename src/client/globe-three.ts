@@ -26,8 +26,13 @@ type GlobeThreeOptions = {
 };
 
 const EARTH_RADIUS_KM = 6371;
-const ORBIT_SAMPLES = 120;
-const ORBIT_PERIOD_MIN = 92.9;
+/** Dense samples so LineLoop has no visible chords */
+const ORBIT_SAMPLES = 360;
+const TEX = "https://cdn.jsdelivr.net/npm/three-globe@2.31.1/example/img";
+const CLOUD_TEX =
+  "https://cdn.jsdelivr.net/gh/turban/webgl-earth@master/images/fair_clouds_4k.png";
+const CLOUD_TEX_FALLBACK =
+  "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_clouds_1024.png";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -39,6 +44,28 @@ function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new T
     r * Math.sin(phi) * Math.sin(theta),
   );
   return target;
+}
+
+/** ECEF sun unit vector → our globe axes (x=lon0, y=north, z=-lon90). */
+function sunDirModel(date: Date, out = new THREE.Vector3()) {
+  const jd = date.getTime() / 86400000 + 2440587.5;
+  const n = jd - 2451545.0;
+  const L = ((((280.460 + 0.9856474 * n) % 360) + 360) % 360) * (Math.PI / 180);
+  const g = ((((357.528 + 0.9856003 * n) % 360) + 360) % 360) * (Math.PI / 180);
+  const lambda = L + (1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * (Math.PI / 180);
+  const epsilon = (23.439 - 0.0000004 * n) * (Math.PI / 180);
+  const cosEps = Math.cos(epsilon);
+  const sinEps = Math.sin(epsilon);
+  const cosL = Math.cos(lambda);
+  const sinL = Math.sin(lambda);
+  const alpha = Math.atan2(cosEps * sinL, cosL);
+  const delta = Math.asin(sinEps * sinL);
+  const gmst = satellite.gstime(date);
+  const cosd = Math.cos(delta);
+  const x = cosd * Math.cos(alpha - gmst);
+  const y = cosd * Math.sin(alpha - gmst);
+  const z = Math.sin(delta);
+  return out.set(x, z, -y).normalize();
 }
 
 function makeGlowSprite(size = 128) {
@@ -57,6 +84,32 @@ function makeGlowSprite(size = 128) {
   return tex;
 }
 
+function waterToSoftRoughnessMap(waterTex: THREE.Texture) {
+  const img = waterTex.image as CanvasImageSource & { width: number; height: number };
+  const c = document.createElement("canvas");
+  c.width = img.width || 1024;
+  c.height = img.height || 512;
+  const ctx = c.getContext("2d")!;
+  ctx.drawImage(img, 0, 0, c.width, c.height);
+  const id = ctx.getImageData(0, 0, c.width, c.height);
+  const d = id.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const water = d[i]! / 255;
+    const rough = 1 - water * 0.14;
+    const v = Math.round(rough * 255);
+    d[i] = v;
+    d[i + 1] = v;
+    d[i + 2] = v;
+    d[i + 3] = 255;
+  }
+  ctx.putImageData(id, 0, 0);
+  const map = new THREE.CanvasTexture(c);
+  map.colorSpace = THREE.NoColorSpace;
+  map.anisotropy = 4;
+  map.needsUpdate = true;
+  return map;
+}
+
 export function createGlobeThree(opts: GlobeThreeOptions) {
   const { canvas } = opts;
   const renderer = new THREE.WebGLRenderer({
@@ -71,166 +124,204 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(44, 1, 0.1, 100);
-  // Pull back so Earth + atmosphere (~1.12) + orbit fit with margin (was FOV42@2.85 → clipped L/R).
   camera.position.set(0, 0.22, 3.55);
 
+  // Pivot: Earth rotates under a *world-fixed* sun (terminator stays real)
   const root = new THREE.Group();
   scene.add(root);
 
-  // Lights
-  scene.add(new THREE.AmbientLight(0xa5d8ff, 0.78));
-  const key = new THREE.DirectionalLight(0xdbeafe, 1.05);
-  key.position.set(3.2, 2.4, 3.5);
-  scene.add(key);
-  const rim = new THREE.DirectionalLight(0x7dd3fc, 0.7);
-  rim.position.set(-3, -1, -2);
-  scene.add(rim);
+  // --- Lighting: soft night ambient + strong sun (Google Earth–like day) ---
+  const ambient = new THREE.AmbientLight(0x6b7c99, 0.28);
+  scene.add(ambient);
+  const hemi = new THREE.HemisphereLight(0xb8d4ff, 0x0b1224, 0.22);
+  scene.add(hemi);
 
+  const sun = new THREE.DirectionalLight(0xfff6e8, 2.15);
+  sun.position.set(5, 0, 0);
+  scene.add(sun);
+  scene.add(sun.target);
+
+  const fill = new THREE.DirectionalLight(0x8ecaff, 0.18);
+  fill.position.set(-4, -1, -2);
+  scene.add(fill);
+
+  const sunDir = new THREE.Vector3(1, 0, 0);
   // Earth
   const earthGroup = new THREE.Group();
-  // Leave breathing room inside the square viewport / circular canvas clip
   earthGroup.scale.setScalar(0.9);
   root.add(earthGroup);
 
   const earthGeo = new THREE.SphereGeometry(1, 96, 96);
-  // Physical material: matte land, soft water sheen (not plastic chrome)
-  const earthMat = new THREE.MeshPhysicalMaterial({
-    color: 0x122038,
+  // Day/night blend via onBeforeCompile — soft terminator, lit day, soft night + city lights
+  const earthMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
     roughness: 1,
     metalness: 0,
-    emissive: 0x0c1a2e,
-    emissiveIntensity: 0.55,
-    clearcoat: 0.02,
-    clearcoatRoughness: 0.9,
-    reflectivity: 0.05,
-    specularIntensity: 0.08,
-    specularColor: new THREE.Color(0x64748b),
+    emissive: new THREE.Color(0x000000),
+    emissiveIntensity: 0,
   });
+
+  const dayNightUniforms = {
+    uNightMap: { value: null as THREE.Texture | null },
+    uSunDir: { value: sunDir.clone() },
+    uDayBoost: { value: 1.12 },
+    uNightFloor: { value: 0.16 },
+    uCityBoost: { value: 1.35 },
+    uTermSoft: { value: 0.22 },
+  };
+
+  earthMat.onBeforeCompile = (shader) => {
+    shader.uniforms.uNightMap = dayNightUniforms.uNightMap;
+    shader.uniforms.uSunDir = dayNightUniforms.uSunDir;
+    shader.uniforms.uDayBoost = dayNightUniforms.uDayBoost;
+    shader.uniforms.uNightFloor = dayNightUniforms.uNightFloor;
+    shader.uniforms.uCityBoost = dayNightUniforms.uCityBoost;
+    shader.uniforms.uTermSoft = dayNightUniforms.uTermSoft;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+        varying vec3 vDnNormal;
+        varying vec2 vDnUv;`,
+      )
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        vDnNormal = normalize(mat3(modelMatrix) * objectNormal);
+        vDnUv = uv;`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+        uniform sampler2D uNightMap;
+        uniform vec3 uSunDir;
+        uniform float uDayBoost;
+        uniform float uNightFloor;
+        uniform float uCityBoost;
+        uniform float uTermSoft;
+        varying vec3 vDnNormal;
+        varying vec2 vDnUv;`,
+      )
+      .replace(
+        "#include <map_fragment>",
+        `#include <map_fragment>
+        float ndl = dot(normalize(vDnNormal), normalize(uSunDir));
+        float dayF = smoothstep(-uTermSoft, uTermSoft * 1.15, ndl);
+        vec3 dayCol = diffuseColor.rgb * uDayBoost;
+        vec3 nightTex = texture2D(uNightMap, vDnUv).rgb;
+        vec3 nightCol = nightTex * uCityBoost + vec3(0.02, 0.04, 0.08);
+        nightCol = max(nightCol, vec3(uNightFloor * 0.35));
+        // Soft mix: day side vibrant, night soft with lights — never pure black
+        diffuseColor.rgb = mix(nightCol, dayCol, dayF);
+        // Keep a hint of city lights near terminator dusk
+        diffuseColor.rgb += nightTex * uCityBoost * 0.12 * (1.0 - dayF) * dayF * 4.0;`,
+      );
+  };
+  earthMat.customProgramCacheKey = () => "earth-day-night-v2";
+
   const earth = new THREE.Mesh(earthGeo, earthMat);
   earthGroup.add(earth);
 
-  /** Water mask (white=ocean) → roughness map: land matte, ocean softly reflective */
-  function waterToSoftRoughnessMap(waterTex: THREE.Texture) {
-    const img = waterTex.image as CanvasImageSource & { width: number; height: number };
-    const c = document.createElement("canvas");
-    c.width = img.width || 1024;
-    c.height = img.height || 512;
-    const ctx = c.getContext("2d")!;
-    ctx.drawImage(img, 0, 0, c.width, c.height);
-    const id = ctx.getImageData(0, 0, c.width, c.height);
-    const d = id.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const water = d[i]! / 255; // oceans bright in earth-water.png
-      // land ~1.0 rough; ocean ~0.68 — soft water, not mirror
-      const rough = 1 - water * 0.18; // oceans only slightly smoother
-      const v = Math.round(rough * 255);
-      d[i] = v;
-      d[i + 1] = v;
-      d[i + 2] = v;
-      d[i + 3] = 255;
-    }
-    ctx.putImageData(id, 0, 0);
-    const map = new THREE.CanvasTexture(c);
-    map.colorSpace = THREE.NoColorSpace;
-    map.anisotropy = 4;
-    map.needsUpdate = true;
-    return map;
-  }
-
   const loader = new THREE.TextureLoader();
-  // NASA Blue Marble / night lights via three-globe CDN; clouds via three.js examples
-  const TEX = "https://cdn.jsdelivr.net/npm/three-globe@2.31.1/example/img";
-  const CLOUD_TEX =
-    "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_clouds_1024.png";
 
-  loader.load(
-    `${TEX}/earth-blue-marble.jpg`,
-    (day) => {
-      day.colorSpace = THREE.SRGBColorSpace;
-      day.anisotropy = 8;
-      earthMat.map = day;
-      earthMat.color.set(0xffffff);
-      earthMat.needsUpdate = true;
-    },
-    undefined,
-    () => {
-      /* fallback night-only below */
-    },
-  );
-  loader.load(
-    `${TEX}/earth-night.jpg`,
-    (night) => {
-      night.colorSpace = THREE.SRGBColorSpace;
-      night.anisotropy = 8;
-      earthMat.emissiveMap = night;
-      earthMat.emissive.set(0x9bb8d4);
-      earthMat.emissiveIntensity = 1.05;
-      if (!earthMat.map) {
-        earthMat.map = night;
-        earthMat.color.set(0xffffff);
-      }
-      earthMat.needsUpdate = true;
-    },
-    undefined,
-    () => {
-      /* keep solid fallback */
-    },
-  );
-  loader.load(
-    `${TEX}/earth-water.png`,
-    (waterTex) => {
-      earthMat.roughnessMap = waterToSoftRoughnessMap(waterTex);
-      earthMat.roughness = 1;
-      earthMat.metalness = 0;
-      earthMat.clearcoat = 0.025;
-      earthMat.clearcoatRoughness = 0.88;
-      earthMat.needsUpdate = true;
-      waterTex.dispose();
-    },
-    undefined,
-    () => {
-      /* no water mask */
-    },
-  );
+  loader.load(`${TEX}/earth-blue-marble.jpg`, (day) => {
+    day.colorSpace = THREE.SRGBColorSpace;
+    day.anisotropy = 8;
+    earthMat.map = day;
+    earthMat.needsUpdate = true;
+  });
+  loader.load(`${TEX}/earth-night.jpg`, (night) => {
+    night.colorSpace = THREE.SRGBColorSpace;
+    night.anisotropy = 8;
+    dayNightUniforms.uNightMap.value = night;
+    earthMat.needsUpdate = true;
+  });
+  loader.load(`${TEX}/earth-water.png`, (waterTex) => {
+    earthMat.roughnessMap = waterToSoftRoughnessMap(waterTex);
+    earthMat.roughness = 1;
+    earthMat.metalness = 0;
+    earthMat.needsUpdate = true;
+    waterTex.dispose();
+  });
 
-  // Drifting cloud layer (randomized start phase)
+  // --- Clouds: denser / more realistic + soft shadow shell ---
   const cloudMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     transparent: true,
-    opacity: 0.42,
+    opacity: 0.72,
     depthWrite: false,
     roughness: 1,
     metalness: 0,
-    emissive: 0x1e293b,
-    emissiveIntensity: 0.08,
+    emissive: 0x334155,
+    emissiveIntensity: 0.04,
+    side: THREE.DoubleSide,
   });
-  const clouds = new THREE.Mesh(new THREE.SphereGeometry(1.015, 64, 64), cloudMat);
+  const clouds = new THREE.Mesh(new THREE.SphereGeometry(1.018, 96, 96), cloudMat);
   clouds.rotation.y = Math.random() * Math.PI * 2;
-  clouds.rotation.z = (Math.random() - 0.5) * 0.08;
+  clouds.rotation.z = (Math.random() - 0.5) * 0.06;
   earthGroup.add(clouds);
-  const cloudDrift = 0.00012 + Math.random() * 0.00008;
+
+  // Soft ground shadow from clouds (dark multiply-ish shell just above surface)
+  const cloudShadowMat = new THREE.MeshBasicMaterial({
+    color: 0x0b1220,
+    transparent: true,
+    opacity: 0.22,
+    depthWrite: false,
+    blending: THREE.MultiplyBlending,
+  });
+  const cloudShadow = new THREE.Mesh(new THREE.SphereGeometry(1.006, 64, 64), cloudShadowMat);
+  cloudShadow.rotation.copy(clouds.rotation);
+  earthGroup.add(cloudShadow);
+
+  const cloudDrift = 0.0001 + Math.random() * 0.00006;
+  const cloudDrift2 = -0.00004 - Math.random() * 0.00003;
+
+  function applyCloudTex(tex: THREE.Texture) {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 8;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    cloudMat.map = tex;
+    cloudMat.alphaMap = tex;
+    cloudMat.opacity = 0.78;
+    cloudMat.needsUpdate = true;
+    cloudShadowMat.alphaMap = tex;
+    cloudShadowMat.opacity = 0.28;
+    cloudShadowMat.needsUpdate = true;
+  }
+
   loader.load(
     CLOUD_TEX,
-    (tex) => {
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.anisotropy = 4;
-      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-      cloudMat.map = tex;
-      cloudMat.alphaMap = tex;
-      cloudMat.needsUpdate = true;
-    },
+    applyCloudTex,
     undefined,
     () => {
-      clouds.visible = false;
+      loader.load(CLOUD_TEX_FALLBACK, applyCloudTex, undefined, () => {
+        clouds.visible = false;
+        cloudShadow.visible = false;
+      });
     },
   );
 
-  // Fresnel atmosphere (three.js) — parented to earthGroup so zoom/rotation track Earth
+  // Second wispy cloud layer for depth
+  const cloudMat2 = cloudMat.clone();
+  cloudMat2.opacity = 0.35;
+  const clouds2 = new THREE.Mesh(new THREE.SphereGeometry(1.022, 64, 64), cloudMat2);
+  clouds2.rotation.y = Math.random() * Math.PI * 2;
+  earthGroup.add(clouds2);
+  loader.load(CLOUD_TEX_FALLBACK, (tex) => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    cloudMat2.map = tex;
+    cloudMat2.alphaMap = tex;
+    cloudMat2.needsUpdate = true;
+  });
+
+  // Fresnel atmosphere (subtle)
   const atmosUniforms = {
     uGlowColor: { value: new THREE.Color(0x1e3a5f) },
-    uRimColor: { value: new THREE.Color(0x38bdf8) },
-    uIntensity: { value: 0.55 },
-    uPower: { value: 3.8 },
+    uRimColor: { value: new THREE.Color(0x7dd3fc) },
+    uIntensity: { value: 0.48 },
+    uPower: { value: 3.6 },
     uPulse: { value: 0 },
   };
   const atmosMat = new THREE.ShaderMaterial({
@@ -261,16 +352,13 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         vec3 viewDir = normalize(cameraPosition - vWorldPos);
         float fresnel = pow(1.0 - abs(dot(viewDir, normalize(vNormal))), uPower);
         fresnel = clamp(fresnel * (uIntensity + uPulse), 0.0, 1.0);
-        vec3 col = mix(uGlowColor, uRimColor, smoothstep(0.0, 1.0, fresnel));
-        float alpha = fresnel * 0.42;
-        gl_FragColor = vec4(col, alpha);
+        vec3 col = mix(uGlowColor, uRimColor, fresnel);
+        gl_FragColor = vec4(col, fresnel * 0.4);
       }
     `,
   });
-  const atmos = new THREE.Mesh(new THREE.SphereGeometry(1.028, 64, 64), atmosMat);
-  earthGroup.add(atmos);
+  earthGroup.add(new THREE.Mesh(new THREE.SphereGeometry(1.03, 64, 64), atmosMat));
 
-  // Soft outer haze shell (also three.js, same group)
   const hazeMat = new THREE.ShaderMaterial({
     uniforms: {
       uColor: { value: new THREE.Color(0x172554) },
@@ -298,25 +386,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       void main() {
         vec3 viewDir = normalize(cameraPosition - vWorldPos);
         float fresnel = pow(1.0 - abs(dot(viewDir, normalize(vNormal))), 3.4);
-        float a = fresnel * (0.12 + uPulse * 0.5);
-        gl_FragColor = vec4(uColor, a);
+        gl_FragColor = vec4(uColor, fresnel * (0.1 + uPulse * 0.4));
       }
     `,
   });
-  const atmosOuter = new THREE.Mesh(new THREE.SphereGeometry(1.055, 48, 48), hazeMat);
-  earthGroup.add(atmosOuter);
-
-  // Subtle grid / equator ring
-  const equ = new THREE.Mesh(
-    new THREE.TorusGeometry(1.002, 0.0018, 8, 128),
-    new THREE.MeshBasicMaterial({
-      color: 0x67e8f9,
-      transparent: true,
-      opacity: 0.22,
-    }),
-  );
-  equ.rotation.x = Math.PI / 2;
-  earthGroup.add(equ);
+  earthGroup.add(new THREE.Mesh(new THREE.SphereGeometry(1.055, 48, 48), hazeMat));
 
   // Visitor markers
   const markerGroup = new THREE.Group();
@@ -345,7 +419,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       markerGroup.add(m);
     }
     for (let i = 0; i < markerPool.length; i++) {
-      const mesh = markerPool[i];
+      const mesh = markerPool[i]!;
       const data = list[i];
       if (!data) {
         mesh.visible = false;
@@ -353,26 +427,25 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       }
       mesh.visible = true;
       mesh.material = data.self ? markerMatSelf : markerMatOther;
-      const s = Math.max(0.0045, Math.min(0.012, data.size * 0.09));
-      mesh.scale.setScalar(s);
+      mesh.scale.setScalar(Math.max(0.0045, Math.min(0.012, data.size * 0.09)));
       latLngAltToVec3(data.lat, data.lng, 12, mesh.position);
     }
   }
 
-  // Orbit line
+  // Orbit — dense LineLoop, period from TLE mean motion (closes cleanly)
   const orbitPositions = new Float32Array(ORBIT_SAMPLES * 3);
   const orbitGeo = new THREE.BufferGeometry();
   orbitGeo.setAttribute("position", new THREE.BufferAttribute(orbitPositions, 3));
-  const orbitMat = new THREE.LineBasicMaterial({
-    color: 0x22d3ee,
-    transparent: true,
-    opacity: 0.85,
-    linewidth: 1,
-  });
-  const orbitLine = new THREE.LineLoop(orbitGeo, orbitMat);
+  const orbitLine = new THREE.LineLoop(
+    orbitGeo,
+    new THREE.LineBasicMaterial({
+      color: 0x22d3ee,
+      transparent: true,
+      opacity: 0.85,
+    }),
+  );
   earthGroup.add(orbitLine);
 
-  // Soft glow ribbon (slightly larger, faded)
   const orbitGlowPositions = new Float32Array(ORBIT_SAMPLES * 3);
   const orbitGlowGeo = new THREE.BufferGeometry();
   orbitGlowGeo.setAttribute("position", new THREE.BufferAttribute(orbitGlowPositions, 3));
@@ -386,7 +459,6 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   );
   earthGroup.add(orbitGlow);
 
-  // ISS
   const iss = createIssModel();
   iss.scale.setScalar(0.028);
   earthGroup.add(iss);
@@ -411,7 +483,6 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   let lastIssEmit = 0;
   const tmp = new THREE.Vector3();
   const tmp2 = new THREE.Vector3();
-  const up = new THREE.Vector3(0, 1, 0);
 
   function ensureSatrec() {
     const tle = opts.getTle();
@@ -428,6 +499,13 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     return satrec;
   }
 
+  function orbitPeriodMs(rec: satellite.SatRec) {
+    // satrec.no = mean motion (rad/min)
+    const no = rec.no;
+    if (!no || !Number.isFinite(no) || no <= 0) return 92.9 * 60 * 1000;
+    return ((2 * Math.PI) / no) * 60 * 1000;
+  }
+
   function propagate(date: Date) {
     const rec = ensureSatrec();
     if (!rec) return null;
@@ -440,7 +518,6 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const latitude = satellite.degreesLat(gd.latitude);
     const longitude = satellite.degreesLong(gd.longitude);
     const altitude = gd.height;
-    // satellite.js ECI velocity is km/s — keep km/s (do not *1000).
     let velocity = 0;
     if (velocityEci) {
       velocity = Math.sqrt(
@@ -449,42 +526,73 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
           velocityEci.z * velocityEci.z,
       );
     }
-    return { latitude, longitude, altitude, velocity, positionEci, velocityEci, gmst };
+    return { latitude, longitude, altitude, velocity };
   }
 
   function rebuildOrbit(now: Date) {
-    const periodMs = ORBIT_PERIOD_MIN * 60 * 1000;
+    const rec = ensureSatrec();
+    if (!rec) return;
+    const periodMs = orbitPeriodMs(rec);
+    let prevLon: number | null = null;
     for (let i = 0; i < ORBIT_SAMPLES; i++) {
+      // i/N spans exactly one mean period; LineLoop closes first↔last (no chord gap)
       const t = new Date(now.getTime() + (i / ORBIT_SAMPLES) * periodMs);
       const p = propagate(t);
-      if (!p) continue;
-      latLngAltToVec3(p.latitude, p.longitude, p.altitude, tmp);
+      if (!p) {
+        // carry forward last good sample
+        if (i > 0) {
+          orbitPositions[i * 3] = orbitPositions[(i - 1) * 3]!;
+          orbitPositions[i * 3 + 1] = orbitPositions[(i - 1) * 3 + 1]!;
+          orbitPositions[i * 3 + 2] = orbitPositions[(i - 1) * 3 + 2]!;
+          orbitGlowPositions[i * 3] = orbitGlowPositions[(i - 1) * 3]!;
+          orbitGlowPositions[i * 3 + 1] = orbitGlowPositions[(i - 1) * 3 + 1]!;
+          orbitGlowPositions[i * 3 + 2] = orbitGlowPositions[(i - 1) * 3 + 2]!;
+        }
+        continue;
+      }
+      // Unwrap longitude jumps for smoother ECEF path (propagate already continuous in ECI)
+      let lon = p.longitude;
+      if (prevLon != null) {
+        while (lon - prevLon > 180) lon -= 360;
+        while (lon - prevLon < -180) lon += 360;
+      }
+      prevLon = lon;
+      latLngAltToVec3(p.latitude, lon, p.altitude, tmp);
       orbitPositions[i * 3] = tmp.x;
       orbitPositions[i * 3 + 1] = tmp.y;
       orbitPositions[i * 3 + 2] = tmp.z;
-      // glow ribbon slightly outside
-      latLngAltToVec3(p.latitude, p.longitude, p.altitude + 40, tmp2);
+      latLngAltToVec3(p.latitude, lon, p.altitude + 35, tmp2);
       orbitGlowPositions[i * 3] = tmp2.x;
       orbitGlowPositions[i * 3 + 1] = tmp2.y;
       orbitGlowPositions[i * 3 + 2] = tmp2.z;
     }
-    orbitGeo.attributes.position.needsUpdate = true;
-    orbitGlowGeo.attributes.position.needsUpdate = true;
+    // Force exact closure: last sample matches first (removes residual chord)
+    orbitPositions[0] = orbitPositions[0]!;
+    orbitGlowPositions[0] = orbitGlowPositions[0]!;
+    (orbitGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+    (orbitGlowGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     orbitGeo.computeBoundingSphere();
   }
 
+  function updateSun(date: Date) {
+    // ECEF sun in our axes; keep FIXED in world space while Earth (root) rotates.
+    sunDirModel(date, sunDir);
+    dayNightUniforms.uSunDir.value.copy(sunDir);
+    sun.position.copy(sunDir).multiplyScalar(6);
+    sun.target.position.set(0, 0, 0);
+    sun.target.updateMatrixWorld();
+  }
+
   function resize() {
-    // Always render into a *square* viewport matching the CSS box.
-    // Percentage height on the canvas can resolve before the aspect-ratio
-    // parent has a height → clientWidth >> clientHeight → flattened globe.
     const box = canvas.parentElement ?? canvas;
     const css = Math.max(
       1,
-      Math.round(Math.min(box.clientWidth || 0, box.clientHeight || 0) || canvas.clientWidth || 520),
+      Math.round(
+        Math.min(box.clientWidth || 0, box.clientHeight || 0) || canvas.clientWidth || 520,
+      ),
     );
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(css, css, false);
-    // Keep CSS square fill; avoid three.js writing non-square inline styles.
     canvas.style.width = "100%";
     canvas.style.height = "100%";
     camera.aspect = 1;
@@ -495,13 +603,10 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   let phi = 0;
   let raf = 0;
   let running = true;
-
   const onResize = () => resize();
   window.addEventListener("resize", onResize);
   const ro =
-    typeof ResizeObserver !== "undefined"
-      ? new ResizeObserver(() => resize())
-      : null;
+    typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => resize()) : null;
   ro?.observe(canvas.parentElement ?? canvas);
 
   function frame(time: number) {
@@ -509,29 +614,27 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     raf = requestAnimationFrame(frame);
 
     syncMarkers(opts.getMarkers());
-
     const now = new Date();
+    updateSun(now);
+
     const p = propagate(now);
     if (p) {
-      if (time - lastOrbitBuild > 15_000 || lastOrbitBuild === 0) {
+      if (time - lastOrbitBuild > 20_000 || lastOrbitBuild === 0) {
         rebuildOrbit(now);
         lastOrbitBuild = time;
       }
       latLngAltToVec3(p.latitude, p.longitude, p.altitude, iss.position);
       issGlow.position.copy(iss.position);
 
-      // Orient along velocity: next sample ~20s ahead
       const ahead = propagate(new Date(now.getTime() + 20_000));
       if (ahead) {
         latLngAltToVec3(ahead.latitude, ahead.longitude, ahead.altitude, tmp);
         iss.up.copy(iss.position).normalize();
         iss.lookAt(tmp);
-        // solar wings roughly face sun-ish: slight roll
         iss.rotateX(Math.PI / 2);
       }
 
-      const pulse = 0.065 + 0.012 * Math.sin(time * 0.004);
-      issGlow.scale.setScalar(pulse);
+      issGlow.scale.setScalar(0.065 + 0.012 * Math.sin(time * 0.004));
 
       if (time - lastIssEmit > 1000) {
         lastIssEmit = time;
@@ -558,13 +661,15 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     }
 
     clouds.rotation.y += cloudDrift;
+    clouds2.rotation.y += cloudDrift2;
+    cloudShadow.rotation.y = clouds.rotation.y;
+    cloudShadow.rotation.z = clouds.rotation.z;
 
     phi += opts.getRotationSpeed();
     root.rotation.y = phi;
     root.rotation.x = 0.18;
 
-    // gentle atmosphere pulse
-    const pulse = 0.015 * Math.sin(time * 0.001);
+    const pulse = 0.012 * Math.sin(time * 0.001);
     atmosUniforms.uPulse.value = pulse;
     (hazeMat.uniforms.uPulse as { value: number }).value = pulse;
 
@@ -586,6 +691,9 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       markerMatSelf.dispose();
       markerMatOther.dispose();
       issGlowTex.dispose();
+      cloudMat.dispose();
+      cloudMat2.dispose();
+      cloudShadowMat.dispose();
       renderer.dispose();
     },
     resize,
