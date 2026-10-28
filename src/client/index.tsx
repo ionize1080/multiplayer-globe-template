@@ -8,6 +8,7 @@ import type { LegacyRef } from "react";
 import type { OutgoingMessage } from "../shared";
 import {
   createGlobeThree,
+  type CloudMode,
   type IssSnapshot,
   type LatLngMarker,
 } from "./globe-three";
@@ -61,6 +62,18 @@ type TlePayload = {
   line1: string;
   line2: string;
   fetchedAt: string;
+};
+
+type CloudMetaPayload = {
+  ok: true;
+  date: string;
+  layer: string;
+  source: string;
+  texturePath: string;
+  width: number;
+  height: number;
+  refreshedAt: string;
+  lagNote: string;
 };
 
 const CLOCKS: ClockZone[] = [
@@ -296,6 +309,11 @@ function App() {
     cloudAmountRef.current = cloudAmount;
   }, [cloudAmount]);
 
+  const [cloudMode, setCloudMode] = useState<CloudMode>("animated");
+  const [cloudStatus, setCloudStatus] = useState("");
+  const [cloudDate, setCloudDate] = useState<string | null>(null);
+  const globeApiRef = useRef<ReturnType<typeof createGlobeThree> | null>(null);
+
   const now = useNow(1000);
   const { data, status, error } = useDashboard(45_000);
   const tle = useIssTle();
@@ -359,9 +377,71 @@ function App() {
       getTle: () => tleRef.current,
       onIssUpdate: (iss) => setLiveIss(iss),
     });
+    globeApiRef.current = globe;
 
-    return () => globe.destroy();
+    return () => {
+      globeApiRef.current = null;
+      globe.destroy();
+    };
   }, []);
+
+  // Near-realtime clouds: fetch NASA mosaic via Worker proxy; refresh ~2h
+  useEffect(() => {
+    const globe = globeApiRef.current;
+    if (!globe) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+
+    async function applyLive() {
+      setCloudStatus("加载近实时云图…");
+      try {
+        const res = await fetch("/api/clouds");
+        const meta = (await res.json()) as CloudMetaPayload | { ok: false; error?: string };
+        if (!res.ok || !("ok" in meta) || meta.ok !== true) {
+          throw new Error(
+            "error" in meta && meta.error ? String(meta.error) : `clouds → ${res.status}`,
+          );
+        }
+        if (cancelled) return;
+        const result = await globe!.setCloudSource({
+          mode: "live",
+          url: `${meta.texturePath}?d=${encodeURIComponent(meta.date)}`,
+          date: meta.date,
+        });
+        if (cancelled) return;
+        if (!result.ok) throw new Error(result.error || "setCloudSource failed");
+        setCloudDate(meta.date);
+        setCloudStatus(`近实时 · ${meta.date} UTC`);
+      } catch (e) {
+        if (cancelled) return;
+        console.warn("live clouds failed", e);
+        setCloudStatus("近实时不可用，已回退动画云图");
+        setCloudDate(null);
+        await globe!.setCloudSource({ mode: "animated" });
+        setCloudMode("animated");
+      }
+    }
+
+    if (cloudMode === "animated") {
+      void globe.setCloudSource({ mode: "animated" }).then(() => {
+        if (!cancelled) {
+          setCloudDate(null);
+          setCloudStatus("");
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void applyLive();
+    timer = setInterval(applyLive, 2 * 60 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [cloudMode]);
 
   const clocks = CLOCKS.map((z) => {
     const time = new Intl.DateTimeFormat("en-GB", {
@@ -552,6 +632,30 @@ function App() {
                 onChange={(e) => setCloudAmount(parseFloat(e.target.value))}
               />
             </div>
+            <div className="control-block cloud-mode-block">
+              <span className="cloud-mode-label">云图模式</span>
+              <div className="segmented" role="group" aria-label="云图模式">
+                <button
+                  type="button"
+                  className={cloudMode === "animated" ? "seg active" : "seg"}
+                  onClick={() => setCloudMode("animated")}
+                >
+                  动画云图
+                </button>
+                <button
+                  type="button"
+                  className={cloudMode === "live" ? "seg active" : "seg"}
+                  onClick={() => setCloudMode("live")}
+                >
+                  近实时云图
+                </button>
+              </div>
+              {cloudStatus ? (
+                <p className="cloud-status" title={cloudDate || undefined}>
+                  {cloudStatus}
+                </p>
+              ) : null}
+            </div>
           </div>
         </section>
 
@@ -618,7 +722,7 @@ function App() {
         <span>
           Powered by <a href="https://threejs.org/">three.js</a>,{" "}
           <a href="https://npmjs.com/package/partyserver/">PartyServer</a>, Celestrak TLE,
-          Open-Meteo, WhereTheISS.at & Yahoo Finance · Earth: NASA Blue Marble · clouds: NASA/MODIS-style via webgl-earth
+          Open-Meteo, WhereTheISS.at & Yahoo Finance · Earth: NASA Blue Marble · clouds: animated webgl-earth / near-realtime NASA GIBS MODIS
         </span>
       </footer>
     </div>

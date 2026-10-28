@@ -17,6 +17,12 @@ export type IssSnapshot = {
   velocity: number;
 };
 
+export type CloudMode = "animated" | "live";
+
+export type CloudSource =
+  | { mode: "animated" }
+  | { mode: "live"; url: string; date?: string };
+
 type GlobeThreeOptions = {
   canvas: HTMLCanvasElement;
   getRotationSpeed: () => number;
@@ -295,14 +301,23 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   cloudShadow.rotation.copy(clouds.rotation);
   earthGroup.add(cloudShadow);
 
-  const cloudDrift = 0.0001 + Math.random() * 0.00006;
-  const cloudDrift2 = -0.00004 - Math.random() * 0.00003;
+  const cloudDriftBase = 0.0001 + Math.random() * 0.00006;
+  const cloudDrift2Base = -0.00004 - Math.random() * 0.00003;
+  let cloudDrift = cloudDriftBase;
+  let cloudDrift2 = cloudDrift2Base;
+  const animatedCloudRotY = clouds.rotation.y;
+  const animatedCloudRotZ = clouds.rotation.z;
 
   let cloudsReady = false;
-  function applyCloudTex(tex: THREE.Texture) {
+  let cloudMode: CloudMode = "animated";
+  let animatedCloudTex: THREE.Texture | null = null;
+  let liveCloudTex: THREE.Texture | null = null;
+  let liveLoadToken = 0;
+
+  function bindCloudTex(tex: THREE.Texture, wrap: THREE.Wrapping = THREE.RepeatWrapping) {
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 8;
-    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.wrapS = tex.wrapT = wrap;
     cloudMat.map = tex;
     cloudMat.alphaMap = tex;
     cloudMat.needsUpdate = true;
@@ -311,15 +326,93 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     cloudsReady = true;
   }
 
+  function applyCloudTex(tex: THREE.Texture) {
+    animatedCloudTex = tex;
+    if (cloudMode === "animated") bindCloudTex(tex, THREE.RepeatWrapping);
+  }
+
   function applyCloudAmount(amount: number) {
     const a = Math.min(1, Math.max(0, amount));
     const on = a > 0.02 && (cloudsReady || !!cloudMat.map);
     clouds.visible = on;
-    clouds2.visible = on;
+    // Second decorative layer only in animated mode (misaligned for live mosaic)
+    clouds2.visible = on && cloudMode === "animated";
     cloudShadow.visible = on;
     cloudMat.opacity = 0.12 + a * 0.58; // 0.12..0.70 (R3: less veil over city lights)
     cloudMat2.opacity = 0.04 + a * 0.32; // 0.04..0.36
     cloudShadowMat.opacity = a * 0.32;
+  }
+
+  /** Convert NASA COT scientific colormap PNG → white clouds with preserved alpha. */
+  async function cotToWhiteCloudTexture(url: string): Promise<THREE.CanvasTexture> {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`live cloud texture → ${res.status}`);
+    const blob = await res.blob();
+    const bmp = await createImageBitmap(blob);
+    const c = document.createElement("canvas");
+    c.width = bmp.width;
+    c.height = bmp.height;
+    const ctx = c.getContext("2d", { willReadFrequently: true })!;
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+    const id = ctx.getImageData(0, 0, c.width, c.height);
+    const d = id.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i + 3]!;
+      if (a < 10) {
+        d[i] = d[i + 1] = d[i + 2] = 0;
+        d[i + 3] = 0;
+      } else {
+        d[i] = d[i + 1] = d[i + 2] = 255;
+        // Mild boost so thin optical-thickness reads as visible haze
+        d[i + 3] = Math.min(255, Math.round(a * 1.08));
+      }
+    }
+    ctx.putImageData(id, 0, 0);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 8;
+    tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  async function setCloudSource(source: CloudSource): Promise<{ ok: boolean; error?: string }> {
+    if (source.mode === "animated") {
+      liveLoadToken += 1;
+      cloudMode = "animated";
+      cloudDrift = cloudDriftBase;
+      cloudDrift2 = cloudDrift2Base;
+      clouds.rotation.y = animatedCloudRotY;
+      clouds.rotation.z = animatedCloudRotZ;
+      cloudShadow.rotation.copy(clouds.rotation);
+      if (animatedCloudTex) bindCloudTex(animatedCloudTex, THREE.RepeatWrapping);
+      applyCloudAmount(opts.getCloudAmount());
+      return { ok: true };
+    }
+
+    const token = ++liveLoadToken;
+    try {
+      const tex = await cotToWhiteCloudTexture(source.url);
+      if (token !== liveLoadToken) {
+        tex.dispose();
+        return { ok: false, error: "stale" };
+      }
+      if (liveCloudTex) liveCloudTex.dispose();
+      liveCloudTex = tex;
+      cloudMode = "live";
+      cloudDrift = 0;
+      cloudDrift2 = 0;
+      // Align equirectangular mosaic with Blue Marble (no decorative drift offset)
+      clouds.rotation.y = 0;
+      clouds.rotation.z = 0;
+      cloudShadow.rotation.set(0, 0, 0);
+      bindCloudTex(tex, THREE.ClampToEdgeWrapping);
+      applyCloudAmount(opts.getCloudAmount());
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
   }
 
   loader.load(
@@ -334,7 +427,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     },
   );
 
-  // Second wispy cloud layer for depth
+  // Second wispy cloud layer for depth (animated mode only)
   const cloudMat2 = cloudMat.clone();
   cloudMat2.opacity = 0.35;
   const clouds2 = new THREE.Mesh(new THREE.SphereGeometry(1.022, 64, 64), cloudMat2);
@@ -817,6 +910,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     destroy() {
       running = false;
       cancelAnimationFrame(raf);
+      liveLoadToken += 1;
       window.removeEventListener("resize", onResize);
       ro?.disconnect();
       orbitGeo.dispose();
@@ -827,11 +921,13 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       markerMatSelf.dispose();
       markerMatOther.dispose();
       issGlowTex.dispose();
+      liveCloudTex?.dispose();
       cloudMat.dispose();
       cloudMat2.dispose();
       cloudShadowMat.dispose();
       renderer.dispose();
     },
     resize,
+    setCloudSource,
   };
 }
