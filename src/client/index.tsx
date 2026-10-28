@@ -6,6 +6,7 @@ import usePartySocket from "partysocket/react";
 import type { LegacyRef } from "react";
 
 import type { OutgoingMessage } from "../shared";
+import type { SunLighting } from "./sun-lighting";
 import {
   createGlobeThree,
   LIVE_CLOUDS_BUILD,
@@ -319,7 +320,7 @@ function App() {
     rotationSpeedRef.current = rotationSpeed;
   }, [rotationSpeed]);
 
-  const [cloudAmount, setCloudAmount] = useState(0.4);
+  const [cloudAmount, setCloudAmount] = useState(0.48);
   const cloudAmountRef = useRef(cloudAmount);
   useEffect(() => {
     cloudAmountRef.current = cloudAmount;
@@ -388,6 +389,12 @@ function App() {
 
   // Day-hemisphere brightness (shader uDayBoost) — user t104u
   const [dayBrightness, setDayBrightness] = useState(1.35);
+  const [sunMode, setSunMode] = useState<"photo" | "live">("photo");
+  const [sunAzimuth, setSunAzimuth] = useState(0);
+  const sunLightingRef = useRef<SunLighting>({ mode: "photo", azimuth: 0 });
+  useEffect(() => {
+    sunLightingRef.current = sunMode === "live" ? { mode: "live" } : { mode: "photo", azimuth: sunAzimuth };
+  }, [sunMode, sunAzimuth]);
   const dayBrightnessRef = useRef(dayBrightness);
   useEffect(() => {
     dayBrightnessRef.current = dayBrightness;
@@ -478,6 +485,7 @@ function App() {
       getStarlinkDensity: () => starlinkDensityRef.current,
       getStarlinkBrightness: () => starlinkBrightnessRef.current,
       getDayBrightness: () => dayBrightnessRef.current,
+      getSunLighting: () => sunLightingRef.current,
       getInteractionMode: () => interactionModeRef.current,
     });
     globeApiRef.current = globe;
@@ -961,7 +969,7 @@ function App() {
               />
             </div>
             <div className="control-block">
-              <span className="cloud-mode-label">图层 · {GLOBE_FX_BUILD}</span>
+              <span className="cloud-mode-label" title={GLOBE_FX_BUILD}>图层</span>
               <div className="layer-toggles">
                 <label className="layer-toggle">
                   <input
@@ -1008,6 +1016,19 @@ function App() {
                   />
                 </div>
               ) : null}
+            </div>
+            <div className="control-block">
+              <div className="sun-control-head">
+                <label htmlFor="sunAzimuthRange">太阳方位 <b>{sunMode === "live" ? "实时" : `${sunAzimuth > 0 ? "+" : ""}${sunAzimuth}°`}</b></label>
+                <button type="button" className="sun-reset" onClick={() => { setSunAzimuth(0); setSunMode("photo"); }} aria-label="复位太阳方位为正面全亮">↺ 复位</button>
+              </div>
+              <div className="segmented sun-modes" role="group" aria-label="太阳照明模式">
+                <button type="button" className={sunMode === "photo" ? "seg active" : "seg"} aria-pressed={sunMode === "photo"} onClick={() => setSunMode("photo")}>摄影布光</button>
+                <button type="button" className={sunMode === "live" ? "seg active" : "seg"} aria-pressed={sunMode === "live"} onClick={() => setSunMode("live")}>真实太阳</button>
+              </div>
+              <input id="sunAzimuthRange" type="range" min={-180} max={180} step={1} value={sunAzimuth} disabled={sunMode === "live"} aria-describedby="sunLightingHint" aria-valuetext={`${sunAzimuth}度，${Math.abs(sunAzimuth) < 15 ? "正面全亮" : Math.abs(sunAzimuth) > 165 ? "背光" : "侧光"}`} onChange={(e) => setSunAzimuth(Number(e.target.value))} />
+              <div className="sun-range-labels" aria-hidden="true"><span>−180° 背光</span><span>0° 全亮</span><span>+180° 背光</span></div>
+              <p id="sunLightingHint" className="cloud-status">{sunMode === "photo" ? "相对当前视角布光 · ±90° 侧光 · 不代表实际昼夜" : "按当前时间计算太阳方向 · 复位可返回正面全亮"}</p>
             </div>
             <div className="control-block">
               <label htmlFor="dayBrightRange">
