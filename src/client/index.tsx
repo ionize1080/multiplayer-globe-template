@@ -353,11 +353,35 @@ function App() {
     showStarlinkRef.current = showStarlink;
   }, [showStarlink]);
 
-  const [interactionMode, setInteractionMode] = useState<InteractionMode>("rotate");
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>(() => {
+    try {
+      return sessionStorage.getItem("ionize-interaction") === "drag" ? "drag" : "rotate";
+    } catch {
+      return "rotate";
+    }
+  });
   const interactionModeRef = useRef(interactionMode);
   useEffect(() => {
     interactionModeRef.current = interactionMode;
+    try {
+      sessionStorage.setItem("ionize-interaction", interactionMode);
+    } catch {
+      /* ignore */
+    }
   }, [interactionMode]);
+
+  // Starlink density (drawn count) + brightness — fx4 defaults
+  const [starlinkDensity, setStarlinkDensity] = useState(2200);
+  const starlinkDensityRef = useRef(starlinkDensity);
+  useEffect(() => {
+    starlinkDensityRef.current = starlinkDensity;
+  }, [starlinkDensity]);
+  const [starlinkBrightness, setStarlinkBrightness] = useState(0.42);
+  const starlinkBrightnessRef = useRef(starlinkBrightness);
+  useEffect(() => {
+    starlinkBrightnessRef.current = starlinkBrightness;
+  }, [starlinkBrightness]);
+  const [starlinkDrawn, setStarlinkDrawn] = useState(0);
 
   const [starlinkStats, setStarlinkStats] = useState<StarlinkStats | null>(null);
   const [starlinkError, setStarlinkError] = useState<string | null>(null);
@@ -418,6 +442,8 @@ function App() {
       onIssUpdate: (iss) => setLiveIss(iss),
       getShowIss: () => showIssRef.current,
       getShowStarlink: () => showStarlinkRef.current,
+      getStarlinkDensity: () => starlinkDensityRef.current,
+      getStarlinkBrightness: () => starlinkBrightnessRef.current,
       getInteractionMode: () => interactionModeRef.current,
     });
     globeApiRef.current = globe;
@@ -505,7 +531,7 @@ function App() {
     const ac = new AbortController();
 
     async function loadOnce(attempt: number): Promise<boolean> {
-      const res = await fetch("/api/starlink?tles=1&max=2200", {
+      const res = await fetch("/api/starlink?tles=1&max=8000", {
         signal: ac.signal,
       });
       const data = (await res.json()) as
@@ -575,7 +601,20 @@ function App() {
     };
   }, [showStarlink]);
 
-  // Stats-only prefetch so panel can show count even before enabling layer
+  // Reflect live drawn count from globe (density slider)
+  useEffect(() => {
+    if (!showStarlink) {
+      setStarlinkDrawn(0);
+      return;
+    }
+    const id = window.setInterval(() => {
+      const n = globeApiRef.current?.getStarlinkDrawn?.() ?? 0;
+      setStarlinkDrawn(n);
+    }, 500);
+    return () => clearInterval(id);
+  }, [showStarlink, starlinkDensity]);
+
+    // Stats-only prefetch so panel can show count even before enabling layer
   useEffect(() => {
     let cancelled = false;
     async function peek() {
@@ -781,8 +820,39 @@ function App() {
             ) : (
               <p className="hint">Stats unavailable{starlinkError ? ` · ${starlinkError}` : ""}</p>
             )}
+            {showStarlink ? (
+              <div className="starlink-sliders">
+                <label htmlFor="starlinkDensity">
+                  Density <b>{starlinkDrawn || starlinkDensity}</b>
+                  <span className="muted"> / target {starlinkDensity}</span>
+                </label>
+                <input
+                  id="starlinkDensity"
+                  type="range"
+                  min={500}
+                  max={8000}
+                  step={100}
+                  value={starlinkDensity}
+                  onChange={(e) => setStarlinkDensity(parseInt(e.target.value, 10))}
+                />
+                <label htmlFor="starlinkBright">
+                  Brightness <b>{Math.round(starlinkBrightness * 100)}%</b>
+                </label>
+                <input
+                  id="starlinkBright"
+                  type="range"
+                  min={0.05}
+                  max={1}
+                  step={0.01}
+                  value={starlinkBrightness}
+                  onChange={(e) => setStarlinkBrightness(parseFloat(e.target.value))}
+                />
+              </div>
+            ) : null}
             <p className="hint">
-              ~2.2k thinned Points · chunked SGP4 · toggle in Controls
+              {showStarlink
+                ? `Drawing ${starlinkDrawn || "…"} pts · bright ${Math.round(starlinkBrightness * 100)}% · chunked SGP4`
+                : "Enable Starlink in Controls · density & brightness sliders appear here"}
               {starlinkLoading ? " · updating…" : ""}
               {starlinkError ? ` · ${starlinkError}` : ""}
             </p>
@@ -869,6 +939,34 @@ function App() {
                   <span>Starlink</span>
                 </label>
               </div>
+              {showStarlink ? (
+                <div className="starlink-sliders compact">
+                  <label htmlFor="starlinkDensityCtrl">
+                    SL density <b>{starlinkDensity}</b>
+                  </label>
+                  <input
+                    id="starlinkDensityCtrl"
+                    type="range"
+                    min={500}
+                    max={8000}
+                    step={100}
+                    value={starlinkDensity}
+                    onChange={(e) => setStarlinkDensity(parseInt(e.target.value, 10))}
+                  />
+                  <label htmlFor="starlinkBrightCtrl">
+                    SL brightness <b>{Math.round(starlinkBrightness * 100)}%</b>
+                  </label>
+                  <input
+                    id="starlinkBrightCtrl"
+                    type="range"
+                    min={0.05}
+                    max={1}
+                    step={0.01}
+                    value={starlinkBrightness}
+                    onChange={(e) => setStarlinkBrightness(parseFloat(e.target.value))}
+                  />
+                </div>
+              ) : null}
             </div>
             <div className="control-block">
               <label htmlFor="cloudRange">

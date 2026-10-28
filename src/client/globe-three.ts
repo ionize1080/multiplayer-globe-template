@@ -35,6 +35,10 @@ type GlobeThreeOptions = {
   getShowIss?: () => boolean;
   /** Starlink Points cloud (default false) */
   getShowStarlink?: () => boolean;
+  /** Drawn Starlink count target (500–8000); default ~2200 */
+  getStarlinkDensity?: () => number;
+  /** Starlink point opacity (0.05–1); default ~0.42 */
+  getStarlinkBrightness?: () => number;
   /** "rotate" = auto-spin; "drag" = pointer orbit (mutually exclusive) */
   getInteractionMode?: () => "rotate" | "drag";
 };
@@ -52,7 +56,7 @@ const CLOUD_TEX_FALLBACK =
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
 export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 /** ISS far-side dim + visitor ripple markers */
-export const GLOBE_FX_BUILD = "fx4-20261028-occlusion-starlink";
+export const GLOBE_FX_BUILD = "fx5-20261028-starlink-sliders-dragfix";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -1080,13 +1084,16 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const STARLINK_CHUNK = 320;
   const STARLINK_REFRESH_MS = 15_000;
   const STARLINK_ALT_FALLBACK_KM = 550;
-  /** Cap drawn sats (server also thins); keeps limb halo under control */
-  const STARLINK_DRAW_MAX = 2200;
+  const STARLINK_HARD_MAX = 8000;
+  const STARLINK_DEFAULT_DENSITY = 2200;
+  const STARLINK_DEFAULT_BRIGHTNESS = 0.42;
+  let starlinkCatalog: StarlinkTlePair[] = [];
   let starlinkSatrecs: satellite.SatRec[] = [];
   let starlinkPropCursor = 0;
   let starlinkPropActive = false;
   let starlinkLastFull = 0;
   let starlinkCount = 0;
+  let starlinkAppliedDensity = -1;
   const starlinkPositions = new Float32Array(3); // replaced on catalog load
   let starlinkPosAttr = new THREE.BufferAttribute(starlinkPositions, 3);
   const starlinkGeo = new THREE.BufferGeometry();
@@ -1095,7 +1102,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     color: 0xa5b4fc,
     size: 0.0055,
     transparent: true,
-    opacity: 0.42,
+    opacity: STARLINK_DEFAULT_BRIGHTNESS,
     depthTest: true,
     depthWrite: false,
     sizeAttenuation: true,
@@ -1106,29 +1113,34 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   starlinkPoints.visible = false;
   earthGroup.add(starlinkPoints);
 
-  function setStarlinkTles(tles: StarlinkTlePair[] | null) {
-    starlinkSatrecs = [];
-    if (!tles || !tles.length) {
+  function rebuildStarlinkSatrecs(densityTarget: number) {
+    const max = Math.min(
+      STARLINK_HARD_MAX,
+      Math.max(500, Math.floor(densityTarget) || STARLINK_DEFAULT_DENSITY),
+    );
+    if (!starlinkCatalog.length) {
+      starlinkSatrecs = [];
       starlinkCount = 0;
+      starlinkAppliedDensity = max;
       starlinkPoints.visible = false;
       starlinkGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(3), 3));
       return;
     }
-    // Evenly thin to DRAW_MAX so limb isn't a white shell
-    const step = Math.max(1, Math.ceil(tles.length / STARLINK_DRAW_MAX));
+    const step = Math.max(1, Math.ceil(starlinkCatalog.length / max));
     const recs: satellite.SatRec[] = [];
-    for (let i = 0; i < tles.length; i += step) {
-      const pair = tles[i]!;
+    for (let i = 0; i < starlinkCatalog.length; i += step) {
+      const pair = starlinkCatalog[i]!;
       try {
         const rec = satellite.twoline2satrec(pair[0], pair[1]);
         if (rec) recs.push(rec);
       } catch {
-        /* skip bad TLE */
+        /* skip */
       }
-      if (recs.length >= STARLINK_DRAW_MAX) break;
+      if (recs.length >= max) break;
     }
     starlinkSatrecs = recs;
     starlinkCount = recs.length;
+    starlinkAppliedDensity = max;
     const buf = new Float32Array(Math.max(1, recs.length) * 3);
     starlinkPosAttr = new THREE.BufferAttribute(buf, 3);
     starlinkPosAttr.setUsage(THREE.DynamicDrawUsage);
@@ -1137,6 +1149,23 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     starlinkPropCursor = 0;
     starlinkPropActive = true;
     starlinkLastFull = 0;
+  }
+
+  function setStarlinkTles(tles: StarlinkTlePair[] | null) {
+    starlinkCatalog = tles && tles.length ? tles.slice(0, STARLINK_HARD_MAX) : [];
+    const density = opts.getStarlinkDensity?.() ?? STARLINK_DEFAULT_DENSITY;
+    rebuildStarlinkSatrecs(density);
+  }
+
+  function applyStarlinkVisuals() {
+    const bright = Math.min(1, Math.max(0.05, opts.getStarlinkBrightness?.() ?? STARLINK_DEFAULT_BRIGHTNESS));
+    starlinkMat.opacity = bright;
+    // Slight size couple so brighter also reads a bit larger, still modest
+    starlinkMat.size = 0.0035 + bright * 0.005;
+    const density = opts.getStarlinkDensity?.() ?? STARLINK_DEFAULT_DENSITY;
+    if (Math.abs(density - starlinkAppliedDensity) >= 50 && starlinkCatalog.length) {
+      rebuildStarlinkSatrecs(density);
+    }
   }
 
   function tickStarlink(now: Date, time: number, show: boolean) {
@@ -1386,32 +1415,36 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   sunBeam.frustumCulled = false;
   scene.add(sunBeam);
 
-  // --- Drag vs rotate interaction (OrbitControls-style; don't fight auto-spin) ---
+  // --- Drag vs rotate: persistent view pose (Alan R2 — no snap-back) ---
   let interactionMode: "rotate" | "drag" = "rotate";
   let dragPointerId: number | null = null;
   let dragLastX = 0;
   let dragLastY = 0;
   let dragVelY = 0;
   let dragVelX = 0;
-  let dragTheta = 0; // yaw around Y
-  let dragPhi = 0.18; // tilt around X (matches prior root.rotation.x)
+  // Single source of truth for earth orientation — never reset on mode flicker
+  let viewTheta = 0;
+  let viewPhi = 0.18;
   const DRAG_PHI_MIN = -0.85;
   const DRAG_PHI_MAX = 0.95;
   const DRAG_SENS = 0.0032;
   const DRAG_INERTIA = 0.78;
+  const ROTATE_PHI = 0.18;
 
   function applyInteractionMode(mode: "rotate" | "drag") {
+    const prev = interactionMode;
     interactionMode = mode;
+    // Do NOT reseeds angles from root — viewTheta/viewPhi already persist
+    dragVelX = 0;
+    dragVelY = 0;
     if (mode === "drag") {
-      // Seed drag angles from current auto-spin pose so switch is seamless
-      dragTheta = phi;
-      dragPhi = root.rotation.x || 0.18;
-      dragVelX = 0;
-      dragVelY = 0;
       canvas.style.cursor = "grab";
     } else {
-      phi = dragTheta;
       canvas.style.cursor = "";
+      // Optional: ease tilt toward default when entering auto-spin (not a hard snap of yaw)
+      if (prev === "drag") {
+        /* keep viewPhi; rotate mode will gently lerp toward ROTATE_PHI */
+      }
     }
   }
 
@@ -1423,7 +1456,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     dragLastY = e.clientY;
     dragVelX = 0;
     dragVelY = 0;
-    canvas.setPointerCapture(e.pointerId);
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
     canvas.style.cursor = "grabbing";
     e.preventDefault();
   }
@@ -1433,8 +1470,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const dy = e.clientY - dragLastY;
     dragLastX = e.clientX;
     dragLastY = e.clientY;
-    dragTheta += dx * DRAG_SENS;
-    dragPhi = Math.min(DRAG_PHI_MAX, Math.max(DRAG_PHI_MIN, dragPhi + dy * DRAG_SENS));
+    viewTheta += dx * DRAG_SENS;
+    viewPhi = Math.min(DRAG_PHI_MAX, Math.max(DRAG_PHI_MIN, viewPhi + dy * DRAG_SENS));
     dragVelY = dx * DRAG_SENS;
     dragVelX = dy * DRAG_SENS;
   }
@@ -1452,7 +1489,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   canvas.addEventListener("pointermove", onPointerMove);
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerUp);
-  canvas.addEventListener("pointerleave", onPointerUp);
+  // Do NOT bind pointerleave → up: it cancelled capture mid-drag and contributed to snap-back
 
   // Stable ISS orientation — avoid lookAt singularity when velocity ‖ radial
   const issQuat = new THREE.Quaternion();
@@ -1528,6 +1565,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
     const showIss = opts.getShowIss?.() ?? true;
     const showStarlink = opts.getShowStarlink?.() ?? false;
+    if (showStarlink) applyStarlinkVisuals();
 
     const now = new Date();
     updateSun(now);
@@ -1614,22 +1652,21 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
     if (interactionMode === "drag") {
       if (dragPointerId == null) {
-        // Light inertia after release
-        dragTheta += dragVelY;
-        dragPhi = Math.min(DRAG_PHI_MAX, Math.max(DRAG_PHI_MIN, dragPhi + dragVelX));
+        viewTheta += dragVelY;
+        viewPhi = Math.min(DRAG_PHI_MAX, Math.max(DRAG_PHI_MIN, viewPhi + dragVelX));
         dragVelY *= DRAG_INERTIA;
         dragVelX *= DRAG_INERTIA;
         if (Math.abs(dragVelY) < 1e-5) dragVelY = 0;
         if (Math.abs(dragVelX) < 1e-5) dragVelX = 0;
       }
-      root.rotation.y = dragTheta;
-      root.rotation.x = dragPhi;
-      phi = dragTheta;
     } else {
-      phi += opts.getRotationSpeed();
-      root.rotation.y = phi;
-      root.rotation.x = 0.18;
+      viewTheta += opts.getRotationSpeed();
+      // Softly ease tilt toward default — never hard-reset yaw (Alan R2 snap-back fix)
+      viewPhi += (ROTATE_PHI - viewPhi) * 0.04;
     }
+    root.rotation.y = viewTheta;
+    root.rotation.x = viewPhi;
+    phi = viewTheta;
 
     root.updateMatrixWorld(true);
     syncMarkers(opts.getMarkers(), time);
@@ -1652,7 +1689,6 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);
       canvas.removeEventListener("pointercancel", onPointerUp);
-      canvas.removeEventListener("pointerleave", onPointerUp);
       ro?.disconnect();
       orbitGeo.dispose();
       orbitGlowGeo.dispose();
@@ -1680,5 +1716,6 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     resize,
     setCloudSource,
     setStarlinkTles,
+    getStarlinkDrawn: () => starlinkCount,
   };
 }
