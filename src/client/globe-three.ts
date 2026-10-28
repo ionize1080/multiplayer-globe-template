@@ -69,6 +69,21 @@ function readStoredViewPose(): GlobeViewPose {
     };
     if (Number.isFinite(p.camYaw)) pose.camYaw = p.camYaw as number;
     if (p.framed === true) pose.framed = true;
+    // fx9 FAIL: framed + camYaw≈0 means "skip forever" at default night crescent — drop yaw/framed
+    if (
+      pose.framed === true &&
+      (pose.camYaw === undefined ||
+        !Number.isFinite(pose.camYaw) ||
+        Math.abs(pose.camYaw as number) < 1e-6)
+    ) {
+      delete pose.camYaw;
+      delete pose.framed;
+      try {
+        sessionStorage.setItem(VIEW_POSE_KEY, JSON.stringify(pose));
+      } catch {
+        /* private mode */
+      }
+    }
     return pose;
   } catch {
     return { theta: 0, phi: VIEW_PHI_DEFAULT };
@@ -87,6 +102,8 @@ let memViewPose: GlobeViewPose = readStoredViewPose();
 /** Only the newest createGlobeThree instance may write pose (Alan E3 remount race). */
 let activeGlobeId = 0;
 let nextGlobeId = 1;
+/** Tear down a prior live globe before a remount creates another (dual-RAF → E3 snap). */
+let activeGlobeDispose: (() => void) | null = null;
 
 export function getMemViewPose(): GlobeViewPose {
   return { ...memViewPose };
@@ -99,15 +116,22 @@ function persistViewPose(
   globeId: number,
 ) {
   if (globeId !== activeGlobeId) return;
+  // Never persist a "framed" zero yaw — that stuck fx8/fx9 at the night crescent
+  const yawOk =
+    camYaw !== undefined && Number.isFinite(camYaw) && Math.abs(camYaw) >= 1e-6;
+  const nextYaw = yawOk ? camYaw : memViewPose.camYaw;
+  const nextFramed = yawOk
+    ? true
+    : memViewPose.framed === true &&
+      typeof memViewPose.camYaw === "number" &&
+      Math.abs(memViewPose.camYaw) >= 1e-6;
   memViewPose = {
     theta,
     phi,
-    camYaw: camYaw !== undefined ? camYaw : memViewPose.camYaw,
-    // Only mark framed when we persist an explicit post-frame camYaw
-    framed:
-      camYaw !== undefined
-        ? true
-        : memViewPose.framed === true && memViewPose.camYaw !== undefined,
+    ...(typeof nextYaw === "number" && Math.abs(nextYaw) >= 1e-6
+      ? { camYaw: nextYaw }
+      : {}),
+    ...(nextFramed ? { framed: true as const } : {}),
   };
   try {
     sessionStorage.setItem(VIEW_POSE_KEY, JSON.stringify(memViewPose));
@@ -127,7 +151,7 @@ const CLOUD_TEX_FALLBACK =
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
 export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 /** ISS far-side dim + visitor ripple markers */
-export const GLOBE_FX_BUILD = "fx9-20261028-half-lit";
+export const GLOBE_FX_BUILD = "fx10-20261028-force-frame";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -261,6 +285,18 @@ function waterToSoftRoughnessMap(waterTex: THREE.Texture) {
 }
 
 export function createGlobeThree(opts: GlobeThreeOptions) {
+  // Remount safety: kill previous RAF/listeners before we become active (Alan E3)
+  if (activeGlobeDispose) {
+    try {
+      activeGlobeDispose();
+    } catch (err) {
+      console.warn("[ionize-globe] prior dispose failed", err);
+    }
+    activeGlobeDispose = null;
+  }
+  // Re-read session so a remount never starts from a stale in-memory snapshot
+  memViewPose = readStoredViewPose();
+
   const { canvas } = opts;
   const renderer = new THREE.WebGLRenderer({
     canvas,
@@ -1488,7 +1524,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   scene.add(sunBeam);
 
   // --- Drag vs rotate: persistent view pose (Alan R2 — no snap-back) ---
-  let interactionMode: "rotate" | "drag" = "rotate";
+  // Sync from React immediately — defaulting to "rotate" then flipping caused false drag→rotate resets
+  let interactionMode: "rotate" | "drag" = opts.getInteractionMode?.() ?? "rotate";
   let dragPointerId: number | null = null;
   let dragLastX = 0;
   let dragLastY = 0;
@@ -1501,13 +1538,24 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   let viewPhi = memViewPose.phi;
   // Camera yaw orbits around Y so world-fixed sun can sit on the RIGHT limb.
   // viewTheta only spins Earth under the sun — it cannot move the glyph on screen.
-  let camYaw = typeof memViewPose.camYaw === "number" ? memViewPose.camYaw : 0;
-  // Require framed:true — fx8 could persist camYaw:0 before first frame and skip forever
-  let sunFramed = memViewPose.framed === true && typeof memViewPose.camYaw === "number";
+  let camYaw =
+    typeof memViewPose.camYaw === "number" && Math.abs(memViewPose.camYaw) >= 1e-6
+      ? memViewPose.camYaw
+      : 0;
+  // Require framed + non-zero yaw. fx9 FAIL: framed&&camYaw≈0 skipped solver forever.
+  let sunFramed =
+    memViewPose.framed === true &&
+    typeof memViewPose.camYaw === "number" &&
+    Number.isFinite(memViewPose.camYaw) &&
+    Math.abs(memViewPose.camYaw) >= 1e-6;
   let lastPosePersist = 0;
+  let frameAttempts = 0;
+  let facingStableCount = 0;
   const camAlong = new THREE.Vector3();
   /** Target sun·cam for ~50% lit (lit≈0.5+0.5*f). Aura ~50/50; range 0.05–0.18. */
   const TARGET_FACING = 0.08;
+  const FACING_TOL = 0.15;
+  const MAX_FRAME_ATTEMPTS = 120;
 
   function applyCameraYaw() {
     camera.position.set(CAM_DIST * Math.sin(camYaw), 0, CAM_DIST * Math.cos(camYaw));
@@ -1520,10 +1568,15 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     return liveSun.dot(camAlong);
   }
 
+  function facingIsOk(facing: number) {
+    return Math.abs(facing - TARGET_FACING) <= FACING_TOL;
+  }
+
   /**
    * Solve camYaw for targetFacing with sun on screen RIGHT.
-   * Old az−π/2+bias does NOT guarantee facing≈bias (equals r·sin(bias)); also
-   * premature camYaw:0 persist left the default night crescent (facing≈−0.55).
+   * Three.js Matrix4.lookAt: z=eye−target, right=cross(up,z)=(cz,0,−cx)
+   * → sunRight = sx·cz − sz·cx (NOT −sx·cz+sz·cx). Keep this so sun is screen-right.
+   * Do not trust sunFramed alone — RAF re-measures facing every frame until stable.
    */
   function frameSunToRightLimb() {
     const sx = liveSun.x;
@@ -1541,8 +1594,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       const cx = Math.sin(yaw);
       const cz = Math.cos(yaw);
       const facingXZ = sx * cx + sz * cz;
-      // right after lookAt = cross(forward, up), forward=-cam → (cz, 0, -cx)
-      const sunRight = sx * cz + sz * -cx;
+      // Three.js lookAt right = (cz, 0, −cx); sun on +X when sunRight > 0
+      const sunRight = sx * cz - sz * cx;
       const score = (sunRight > 0 ? 10 : -10) + facingXZ;
       if (score > bestScore) {
         bestScore = score;
@@ -1562,7 +1615,6 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         camYaw = mid;
         applyCameraYaw();
         facing = measureFacing();
-        // Moving yaw toward sun az increases facing; sun az is atan2(sx,sz)
         // Sign: d(facing)/d(yaw) = sx*cos(yaw) - sz*sin(yaw)
         const dF = sx * Math.cos(mid) - sz * Math.sin(mid);
         if ((facing < TARGET_FACING && dF > 0) || (facing > TARGET_FACING && dF < 0)) {
@@ -1576,14 +1628,50 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       facing = measureFacing();
     }
 
-    sunFramed = true;
-    console.debug("[ionize-sun]", {
+    const ok = facingIsOk(facing) && Math.abs(camYaw) >= 1e-6;
+    sunFramed = ok;
+    if (ok) facingStableCount += 1;
+    else facingStableCount = 0;
+    // info (not debug) so Alan sees it without Verbose filter
+    console.info("[ionize-sun]", {
       facing,
       targetFacing: TARGET_FACING,
       camYaw,
       litApprox: 0.5 + 0.5 * facing,
+      framed: sunFramed,
+      attempt: frameAttempts,
+      stable: facingStableCount,
     });
-    persistViewPose(viewTheta, viewPhi, camYaw, globeId);
+    // Persist yaw/framed only when facing is actually on target
+    if (ok) persistViewPose(viewTheta, viewPhi, camYaw, globeId);
+    return facing;
+  }
+
+  /** Re-frame until measured facing matches TARGET (boolean alone lied in fx9). */
+  function ensureSunFramed() {
+    applyCameraYaw();
+    let facing = measureFacing();
+    const badYaw = !Number.isFinite(camYaw) || Math.abs(camYaw) < 1e-6;
+    // Drag owns theta/phi — never re-frame for facing drift (looks like E3 snap).
+    // Still allow a one-shot solve if camYaw is stuck at 0 / unframed.
+    if (interactionMode === "drag") {
+      if ((!sunFramed || badYaw) && frameAttempts < MAX_FRAME_ATTEMPTS) {
+        frameAttempts += 1;
+        return frameSunToRightLimb();
+      }
+      return facing;
+    }
+    const need = !sunFramed || badYaw || !facingIsOk(facing);
+    if (!need) {
+      facingStableCount = Math.min(facingStableCount + 1, 8);
+      sunFramed = true;
+      return facing;
+    }
+    if (frameAttempts >= MAX_FRAME_ATTEMPTS) {
+      return facing;
+    }
+    frameAttempts += 1;
+    return frameSunToRightLimb();
   }
   const DRAG_PHI_MIN = -0.85;
   const DRAG_PHI_MAX = 0.95;
@@ -1592,12 +1680,14 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const ROTATE_PHI = VIEW_PHI_DEFAULT;
 
   function applyInteractionMode(mode: "rotate" | "drag") {
+    if (mode === interactionMode) return; // no-op — never treat as drag→rotate
     const prev = interactionMode;
     interactionMode = mode;
     dragVelX = 0;
     dragVelY = 0;
     if (mode === "drag") {
       canvas.style.cursor = "grab";
+      // Keep current theta/phi/camYaw — user continues from where they were
     } else {
       canvas.style.cursor = "";
       // Drag → rotate: active reset to default spin pose (user t101u).
@@ -1606,6 +1696,9 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         dragPointerId = null;
         viewTheta = 0;
         viewPhi = ROTATE_PHI;
+        sunFramed = false;
+        frameAttempts = 0;
+        facingStableCount = 0;
         frameSunToRightLimb(); // camYaw from liveSun; persists pose
         applyCameraYaw();
       }
@@ -1639,8 +1732,13 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     dragVelY = dx * DRAG_SENS;
     dragVelX = dy * DRAG_SENS;
     // Persist every move so remount cannot restore a stale mid-drag snapshot (E3)
-    // Do not write camYaw until framed — premature 0 makes next mount skip framing (fx8 crescent)
-    persistViewPose(viewTheta, viewPhi, sunFramed ? camYaw : undefined, globeId);
+    // Yaw only when framed+nonzero; theta/phi always written (persistViewPose merges yaw)
+    persistViewPose(
+      viewTheta,
+      viewPhi,
+      sunFramed && Math.abs(camYaw) >= 1e-6 ? camYaw : undefined,
+      globeId,
+    );
     lastPosePersist = performance.now();
   }
   function onPointerUp(e: PointerEvent) {
@@ -1737,8 +1835,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
     const now = new Date();
     updateSun(now);
-    // Only after real updateSun — never frame with placeholder liveSun
-    if (!sunFramed) frameSunToRightLimb();
+    // Force re-measure every frame until facing≈TARGET (fx9 trusted boolean → stuck camYaw=0)
+    ensureSunFramed();
     applyCameraYaw();
     // Day brightness slider → shader uDayBoost (does not fake sunDir)
     const dayBright = Math.min(2.4, Math.max(0.8, opts.getDayBrightness?.() ?? 1.55));
@@ -1869,7 +1967,12 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const persistEvery = interactionMode === "drag" ? 50 : 250;
     if (time - lastPosePersist > persistEvery) {
       lastPosePersist = time;
-      persistViewPose(viewTheta, viewPhi, sunFramed ? camYaw : undefined, globeId);
+      persistViewPose(
+        viewTheta,
+        viewPhi,
+        sunFramed && Math.abs(camYaw) >= 1e-6 ? camYaw : undefined,
+        globeId,
+      );
     }
 
     root.updateMatrixWorld(true);
@@ -1883,41 +1986,50 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   }
   raf = requestAnimationFrame(frame);
 
+  function destroy() {
+    persistViewPose(
+      viewTheta,
+      viewPhi,
+      sunFramed && Math.abs(camYaw) >= 1e-6 ? camYaw : undefined,
+      globeId,
+    );
+    running = false;
+    cancelAnimationFrame(raf);
+    if (activeGlobeDispose === destroy) activeGlobeDispose = null;
+    liveLoadToken += 1;
+    window.removeEventListener("resize", onResize);
+    canvas.removeEventListener("pointerdown", onPointerDown);
+    canvas.removeEventListener("pointermove", onPointerMove);
+    canvas.removeEventListener("pointerup", onPointerUp);
+    canvas.removeEventListener("pointercancel", onPointerUp);
+    ro?.disconnect();
+    orbitGeo.dispose();
+    orbitGlowGeo.dispose();
+    earthGeo.dispose();
+    earthMat.dispose();
+    for (const fx of markerPool) {
+      (fx.core.material as THREE.SpriteMaterial).dispose();
+      (fx.ringA.material as THREE.SpriteMaterial).dispose();
+      (fx.ringB.material as THREE.SpriteMaterial).dispose();
+    }
+    visitorDotTex.dispose();
+    visitorRingTex.dispose();
+    issGlowTex.dispose();
+    sunTex.dispose();
+    (sunSprite.material as THREE.SpriteMaterial).dispose();
+    (sunBeam.material as THREE.SpriteMaterial).dispose();
+    starlinkGeo.dispose();
+    starlinkMat.dispose();
+    liveCloudTex?.dispose();
+    cloudMat.dispose();
+    cloudMat2.dispose();
+    cloudShadowMat.dispose();
+    renderer.dispose();
+  }
+  activeGlobeDispose = destroy;
+
   return {
-    destroy() {
-      persistViewPose(viewTheta, viewPhi, sunFramed ? camYaw : undefined, globeId);
-      running = false;
-      cancelAnimationFrame(raf);
-      liveLoadToken += 1;
-      window.removeEventListener("resize", onResize);
-      canvas.removeEventListener("pointerdown", onPointerDown);
-      canvas.removeEventListener("pointermove", onPointerMove);
-      canvas.removeEventListener("pointerup", onPointerUp);
-      canvas.removeEventListener("pointercancel", onPointerUp);
-      ro?.disconnect();
-      orbitGeo.dispose();
-      orbitGlowGeo.dispose();
-      earthGeo.dispose();
-      earthMat.dispose();
-      for (const fx of markerPool) {
-        (fx.core.material as THREE.SpriteMaterial).dispose();
-        (fx.ringA.material as THREE.SpriteMaterial).dispose();
-        (fx.ringB.material as THREE.SpriteMaterial).dispose();
-      }
-      visitorDotTex.dispose();
-      visitorRingTex.dispose();
-      issGlowTex.dispose();
-      sunTex.dispose();
-      (sunSprite.material as THREE.SpriteMaterial).dispose();
-      (sunBeam.material as THREE.SpriteMaterial).dispose();
-      starlinkGeo.dispose();
-      starlinkMat.dispose();
-      liveCloudTex?.dispose();
-      cloudMat.dispose();
-      cloudMat2.dispose();
-      cloudShadowMat.dispose();
-      renderer.dispose();
-    },
+    destroy,
     resize,
     setCloudSource,
     setStarlinkTles,
