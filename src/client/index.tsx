@@ -319,7 +319,7 @@ function App() {
     rotationSpeedRef.current = rotationSpeed;
   }, [rotationSpeed]);
 
-  const [cloudAmount, setCloudAmount] = useState(0.55);
+  const [cloudAmount, setCloudAmount] = useState(0.4);
   const cloudAmountRef = useRef(cloudAmount);
   useEffect(() => {
     cloudAmountRef.current = cloudAmount;
@@ -387,7 +387,7 @@ function App() {
   const [starlinkDrawn, setStarlinkDrawn] = useState(0);
 
   // Day-hemisphere brightness (shader uDayBoost) — user t104u
-  const [dayBrightness, setDayBrightness] = useState(1.85);
+  const [dayBrightness, setDayBrightness] = useState(1.35);
   const dayBrightnessRef = useRef(dayBrightness);
   useEffect(() => {
     dayBrightnessRef.current = dayBrightness;

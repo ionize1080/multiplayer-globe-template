@@ -39,7 +39,7 @@ type GlobeThreeOptions = {
   getStarlinkDensity?: () => number;
   /** Starlink point opacity (0.05–1); default ~0.42 */
   getStarlinkBrightness?: () => number;
-  /** Day-hemisphere shader gain (uDayBoost); default ~1.55 */
+  /** Day-hemisphere shader gain (uDayBoost); default 1.35 */
   getDayBrightness?: () => number;
   /** "rotate" = auto-spin; "drag" = pointer orbit (mutually exclusive) */
   getInteractionMode?: () => "rotate" | "drag";
@@ -49,7 +49,7 @@ export type StarlinkTlePair = [string, string];
 
 /** Survives React remounts / StrictMode — Alan fx5 ~10s snap-back */
 export type GlobeViewPose = { theta: number; phi: number; camYaw?: number; framed?: boolean };
-const VIEW_POSE_KEY = "ionize-view-pose-fx20"; // fx17: drop Americas-locked theta=0 sessions
+const VIEW_POSE_KEY = "ionize-view-pose-fx21"; // Preserve the production camera pose.
 const VIEW_PHI_DEFAULT = 0.18;
 /** Camera orbit distance (Aura R3); yaw frames sun on right limb without faking sunDir */
 const CAM_DIST = 3.05;
@@ -146,7 +146,7 @@ const CLOUD_TEX_FALLBACK =
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
 export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 /** ISS far-side dim + visitor ripple markers */
-export const GLOBE_FX_BUILD = "fx20-20261028-sunward";
+export const GLOBE_FX_BUILD = "fx22-20261028-clear-earth";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -278,32 +278,6 @@ function farSideBrightness(worldPos: THREE.Vector3, cameraPos: THREE.Vector3) {
   return THREE.MathUtils.smoothstep(facing, -0.05, 0.35);
 }
 
-function waterToSoftRoughnessMap(waterTex: THREE.Texture) {
-  const img = waterTex.image as CanvasImageSource & { width: number; height: number };
-  const c = document.createElement("canvas");
-  c.width = img.width || 1024;
-  c.height = img.height || 512;
-  const ctx = c.getContext("2d")!;
-  ctx.drawImage(img, 0, 0, c.width, c.height);
-  const id = ctx.getImageData(0, 0, c.width, c.height);
-  const d = id.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const water = d[i]! / 255;
-    const rough = 1 - water * 0.14;
-    const v = Math.round(rough * 255);
-    d[i] = v;
-    d[i + 1] = v;
-    d[i + 2] = v;
-    d[i + 3] = 255;
-  }
-  ctx.putImageData(id, 0, 0);
-  const map = new THREE.CanvasTexture(c);
-  map.colorSpace = THREE.NoColorSpace;
-  map.anisotropy = 4;
-  map.needsUpdate = true;
-  return map;
-}
-
 export function createGlobeThree(opts: GlobeThreeOptions) {
   // Remount safety: kill previous RAF/listeners before we become active (Alan E3)
   if (activeGlobeDispose) {
@@ -373,9 +347,9 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const dayNightUniforms = {
     uNightMap: { value: null as THREE.Texture | null },
     uSunDir: { value: sunDir.clone() },
-    uDayBoost: { value: 1.85 },
-    uNightFloor: { value: 0.28 },
-    uCityBoost: { value: 2.8 },
+    uDayBoost: { value: 1.35 },
+    uNightFloor: { value: 0.025 },
+    uCityBoost: { value: 1.6 },
     uTermSoft: { value: 0.16 },
   };
 
@@ -423,28 +397,27 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         float ndl = dot(normalize(vDnNormal), normalize(uSunDir));
         // fx12: tighter terminator so geometric half-lit reads as ~half on screen
         float dayF = smoothstep(-uTermSoft, uTermSoft, ndl);
-        vec3 dayCol = diffuseColor.rgb * uDayBoost;
-        dayCol = mix(dayCol, dayCol * vec3(1.08, 1.02, 0.92), 0.35);
-        dayCol = mix(vec3(dot(dayCol, vec3(0.299, 0.587, 0.114))), dayCol, 1.18);
-        // fx14: day oceans were reading as night next to city lights — lift hard
-        dayCol = dayCol * 1.22 + vec3(0.03, 0.05, 0.09);
-        dayCol = max(dayCol, vec3(0.10, 0.16, 0.28));
+        // Work in linear RGB. Additive floors wash dark oceans into flat gray-blue;
+        // preserve the albedo and let directional light shape the hemisphere.
+        vec3 albedo = diffuseColor.rgb;
+        float sunlight = 0.38 + 0.62 * sqrt(max(ndl, 0.0));
+        vec3 dayCol = albedo * uDayBoost * sunlight;
         vec3 nightTex = texture2D(uNightMap, vDnUv).rgb;
-        vec3 cities = nightTex * nightTex * uCityBoost;
-        vec3 nightCol = cities + vec3(0.02, 0.03, 0.06) * uNightFloor;
-        nightCol = max(nightCol, vec3(uNightFloor * 0.25));
+        float cityMask = smoothstep(0.015, 0.18, max(nightTex.r, max(nightTex.g, nightTex.b)));
+        vec3 cities = nightTex * cityMask * uCityBoost;
+        // Dim terrain retains coastlines without a uniform gray night hemisphere.
+        vec3 nightCol = albedo * vec3(0.55, 0.7, 1.0) * uNightFloor + cities;
         diffuseColor.rgb = mix(nightCol, dayCol, dayF);
-        diffuseColor.rgb += cities * 0.25 * (1.0 - dayF) * dayF * 4.0;`,
+        `,
       )
       .replace(
         "#include <opaque_fragment>",
-        `// fx16: day/night mix is final look — MeshStandard lights were crushing the day
-        // half so facing=0 still read as a night crescent next to city lights.
+        `// The day/night pass already applies lighting; do not light it twice.
         outgoingLight = diffuseColor.rgb;
         #include <opaque_fragment>`,
       );
   };
-  earthMat.customProgramCacheKey = () => "earth-day-night-r5-nolight";
+  earthMat.customProgramCacheKey = () => "earth-day-night-r6-clear";
 
   const earth = new THREE.Mesh(earthGeo, earthMat);
   earthMat.depthWrite = true;
@@ -467,11 +440,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     night.colorSpace = THREE.SRGBColorSpace;
     night.anisotropy = 8;
     dayNightUniforms.uNightMap.value = night;
-    // Also drive emissiveMap so MeshStandard path contributes city glow
-    earthMat.emissiveMap = night;
-    earthMat.emissive = new THREE.Color(0xfff4e0);
-    earthMat.emissiveIntensity = 0.55;
-    earthMat.needsUpdate = true;
+    // City emission is included only on the night side in the day/night pass.
   }
   loader.load(
     NIGHT_LIGHTS,
@@ -479,13 +448,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     undefined,
     () => loader.load(NIGHT_FALLBACK, applyNightMap),
   );
-  loader.load(`${TEX}/earth-water.png`, (waterTex) => {
-    earthMat.roughnessMap = waterToSoftRoughnessMap(waterTex);
-    earthMat.roughness = 1;
-    earthMat.metalness = 0;
-    earthMat.needsUpdate = true;
-    waterTex.dispose();
-  });
+  // The custom day/night output does not use PBR roughness. Avoid downloading
+  // and processing a water map whose result is discarded by that pass.
 
   // --- Clouds: denser / more realistic + soft shadow shell ---
   const cloudMat = new THREE.MeshStandardMaterial({
@@ -495,22 +459,22 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     depthWrite: false,
     roughness: 1,
     metalness: 0,
-    emissive: 0x334155,
-    emissiveIntensity: 0.04,
-    side: THREE.DoubleSide,
+    emissive: 0x000000,
+    emissiveIntensity: 0,
+    side: THREE.FrontSide,
   });
   const clouds = new THREE.Mesh(new THREE.SphereGeometry(1.018, 96, 96), cloudMat);
   clouds.rotation.y = Math.random() * Math.PI * 2;
   clouds.rotation.z = (Math.random() - 0.5) * 0.06;
   earthGroup.add(clouds);
 
-  // Soft ground shadow from clouds (dark multiply-ish shell just above surface)
+  // A sparse RGBA shadow mask, never an all-over multiply shell.
   const cloudShadowMat = new THREE.MeshBasicMaterial({
     color: 0x0b1220,
     transparent: true,
     opacity: 0.22,
     depthWrite: false,
-    blending: THREE.MultiplyBlending,
+    blending: THREE.NormalBlending,
   });
   const cloudShadow = new THREE.Mesh(new THREE.SphereGeometry(1.006, 64, 64), cloudShadowMat);
   cloudShadow.rotation.copy(clouds.rotation);
@@ -534,45 +498,49 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     tex.anisotropy = 8;
     tex.wrapS = tex.wrapT = wrap;
     cloudMat.map = tex;
-    cloudMat.alphaMap = tex;
-    // Live: unlit-ish white so TrueColor mask isn't muddy gray under night lighting
-    if (cloudMode === "live") {
-      cloudMat.color.set(0xffffff);
-      cloudMat.emissive.set(0xffffff);
-      cloudMat.emissiveIntensity = 0.9;
-      cloudMat.roughness = 1;
-      cloudMat.metalness = 0;
-    } else {
-      cloudMat.color.set(0xffffff);
-      cloudMat.emissive.set(0x334155);
-      cloudMat.emissiveIntensity = 0.04;
-    }
+    // Both sources are white RGB + coverage in A. alphaMap samples GREEN,
+    // which is always 1 in the live mask; use map's actual alpha instead.
+    cloudMat.alphaMap = null;
     cloudMat.needsUpdate = true;
-    cloudShadowMat.alphaMap = tex;
+    cloudShadowMat.map = tex;
+    cloudShadowMat.alphaMap = null;
     cloudShadowMat.needsUpdate = true;
     cloudsReady = true;
   }
 
   function applyCloudTex(tex: THREE.Texture) {
-    animatedCloudTex = tex;
-    if (cloudMode === "animated") bindCloudTex(tex, THREE.RepeatWrapping);
+    // Normalize grayscale/RGBA sources once so gray mask pixels cannot tint
+    // the ocean. A single texture is shared by clouds and their sparse shadow.
+    const img = tex.image as CanvasImageSource & { width: number; height: number };
+    const c = document.createElement("canvas");
+    c.width = img.width;
+    c.height = img.height;
+    const ctx = c.getContext("2d")!;
+    ctx.drawImage(img, 0, 0);
+    const pixels = ctx.getImageData(0, 0, c.width, c.height);
+    const d = pixels.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const density = (0.2126 * d[i]! + 0.7152 * d[i + 1]! + 0.0722 * d[i + 2]!) / 255;
+      d[i + 3] = Math.round(d[i + 3]! * THREE.MathUtils.smoothstep(density, 0.08, 0.9));
+      d[i] = d[i + 1] = d[i + 2] = 255;
+    }
+    ctx.putImageData(pixels, 0, 0);
+    const mask = new THREE.CanvasTexture(c);
+    tex.dispose();
+    animatedCloudTex = mask;
+    if (cloudMode === "animated") bindCloudTex(mask, THREE.RepeatWrapping);
+    bindClouds2(mask);
   }
 
   function applyCloudAmount(amount: number) {
     const a = Math.min(1, Math.max(0, amount));
-    const on = a > 0.02 && (cloudsReady || !!cloudMat.map);
+    const on = a > 0 && (cloudsReady || !!cloudMat.map);
     clouds.visible = on;
-    // Live: global soft fair_clouds shell so orbital barcodes never read empty
-    clouds2.visible = on;
+    clouds2.visible = on && cloudMode === "animated" && !!cloudMat2.map;
     cloudShadow.visible = on;
-    // Live: lighter veil so land stays readable at ~40–55%
-    cloudMat.opacity =
-      cloudMode === "live" ? 0.06 + a * 0.28 : 0.12 + a * 0.58;
-    cloudMat2.opacity =
-      cloudMode === "live"
-        ? 0.22 + a * 0.34 // strong fair_clouds underlay hides barcodes
-        : 0.04 + a * 0.32;
-    cloudShadowMat.opacity = a * (cloudMode === "live" ? 0.08 : 0.32);
+    cloudMat.opacity = a * 0.72;
+    cloudMat2.opacity = a * 0.12;
+    cloudShadowMat.opacity = a * 0.08;
   }
 
   /** Yield so React can paint / Earth can keep spinning during heavy mask work. */
@@ -909,15 +877,12 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
     cloudMat2.map = tex;
-    cloudMat2.alphaMap = tex;
+    cloudMat2.alphaMap = null;
     cloudMat2.color.set(0xffffff);
-    cloudMat2.emissive.set(0xffffff);
-    cloudMat2.emissiveIntensity = 0.35;
+    cloudMat2.emissive.set(0x000000);
+    cloudMat2.emissiveIntensity = 0;
     cloudMat2.needsUpdate = true;
   }
-  loader.load(CLOUD_TEX, bindClouds2, undefined, () => {
-    loader.load(CLOUD_TEX_FALLBACK, bindClouds2);
-  });
 
   // Fresnel atmosphere (subtle)
   const atmosUniforms = {
@@ -1913,7 +1878,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     }
     applyCameraYaw();
     // Day brightness slider → shader uDayBoost (does not fake sunDir)
-    const dayBright = Math.min(2.4, Math.max(0.8, opts.getDayBrightness?.() ?? 1.55));
+    const dayBright = Math.min(2.4, Math.max(0.8, opts.getDayBrightness?.() ?? 1.35));
     dayNightUniforms.uDayBoost.value = dayBright;
     // Limb-friendly fade: hide when clearly behind; full near limb / slightly camera-side
     // (old smoothstep(-0.02,0.12) killed opacity at facing≈0 — Alan fx7b FAIL)
@@ -2097,6 +2062,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     starlinkGeo.dispose();
     starlinkMat.dispose();
     liveCloudTex?.dispose();
+    animatedCloudTex?.dispose();
     cloudMat.dispose();
     cloudMat2.dispose();
     cloudShadowMat.dispose();
