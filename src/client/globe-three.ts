@@ -146,7 +146,7 @@ const CLOUD_TEX_FALLBACK =
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
 export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 /** ISS far-side dim + visitor ripple markers */
-export const GLOBE_FX_BUILD = "fx22-20261028-clear-earth";
+export const GLOBE_FX_BUILD = "fx23-20261028-natural-ocean";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -344,7 +344,13 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     emissiveIntensity: 0,
   });
 
+  // Safe fallback: leave the source color unchanged until the water mask loads.
+  let disposed = false;
+  const emptyWaterMask = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
+  emptyWaterMask.needsUpdate = true;
+  let waterMask: THREE.Texture | null = null;
   const dayNightUniforms = {
+    uWaterMask: { value: emptyWaterMask as THREE.Texture },
     uNightMap: { value: null as THREE.Texture | null },
     uSunDir: { value: sunDir.clone() },
     uDayBoost: { value: 1.35 },
@@ -354,6 +360,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   };
 
   earthMat.onBeforeCompile = (shader) => {
+    shader.uniforms.uWaterMask = dayNightUniforms.uWaterMask;
     shader.uniforms.uNightMap = dayNightUniforms.uNightMap;
     shader.uniforms.uSunDir = dayNightUniforms.uSunDir;
     shader.uniforms.uDayBoost = dayNightUniforms.uDayBoost;
@@ -383,6 +390,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         "#include <common>",
         `#include <common>
         uniform sampler2D uNightMap;
+        uniform sampler2D uWaterMask;
         uniform vec3 uSunDir;
         uniform float uDayBoost;
         uniform float uNightFloor;
@@ -400,6 +408,16 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         // Work in linear RGB. Additive floors wash dark oceans into flat gray-blue;
         // preserve the albedo and let directional light shape the hemisphere.
         vec3 albedo = diffuseColor.rgb;
+        // Select actual water, not blue terrain or white polar ice. The mask is
+        // data (linear), while the albedo has already been decoded from sRGB.
+        float water = smoothstep(0.4, 0.9, texture2D(uWaterMask, vDnUv).r);
+        float blueChroma = (albedo.b - max(albedo.r, albedo.g)) / max(albedo.b, 0.0001);
+        float oceanWeight = water * smoothstep(0.05, 0.3, blueChroma);
+        float oceanLuma = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+        // Restrained navy rather than electric blue: reduce chroma and blue
+        // energy, retaining the texture's relative coastal/deep-water detail.
+        vec3 oceanColor = mix(vec3(oceanLuma), albedo, 0.62) * vec3(0.85, 0.95, 0.72);
+        albedo = mix(albedo, oceanColor, oceanWeight);
         float sunlight = 0.38 + 0.62 * sqrt(max(ndl, 0.0));
         vec3 dayCol = albedo * uDayBoost * sunlight;
         vec3 nightTex = texture2D(uNightMap, vDnUv).rgb;
@@ -417,7 +435,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         #include <opaque_fragment>`,
       );
   };
-  earthMat.customProgramCacheKey = () => "earth-day-night-r6-clear";
+  earthMat.customProgramCacheKey = () => "earth-day-night-r7-natural-ocean";
 
   const earth = new THREE.Mesh(earthGeo, earthMat);
   earthMat.depthWrite = true;
@@ -426,6 +444,17 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   earthGroup.add(earth);
 
   const loader = new THREE.TextureLoader();
+
+  loader.load(`${TEX}/earth-water.png`, (mask) => {
+    // Texture loads may finish after a remount has disposed this globe.
+    if (disposed) { mask.dispose(); return; }
+    mask.colorSpace = THREE.NoColorSpace;
+    mask.anisotropy = 4;
+    waterMask = mask;
+    dayNightUniforms.uWaterMask.value = mask;
+  }, undefined, () => {
+    console.warn("Ocean color mask unavailable; keeping the original Earth texture.");
+  });
 
   loader.load(`${TEX}/earth-blue-marble.jpg`, (day) => {
     day.colorSpace = THREE.SRGBColorSpace;
@@ -448,8 +477,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     undefined,
     () => loader.load(NIGHT_FALLBACK, applyNightMap),
   );
-  // The custom day/night output does not use PBR roughness. Avoid downloading
-  // and processing a water map whose result is discarded by that pass.
+  // The water mask is used only for selective ocean grading, not PBR roughness.
 
   // --- Clouds: denser / more realistic + soft shadow shell ---
   const cloudMat = new THREE.MeshStandardMaterial({
@@ -2028,6 +2056,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   raf = requestAnimationFrame(frame);
 
   function destroy() {
+    disposed = true;
     persistViewPose(
       viewTheta,
       viewPhi,
@@ -2048,6 +2077,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     orbitGlowGeo.dispose();
     earthGeo.dispose();
     earthMat.dispose();
+    waterMask?.dispose();
+    emptyWaterMask.dispose();
     for (const fx of markerPool) {
       (fx.core.material as THREE.SpriteMaterial).dispose();
       (fx.ringA.material as THREE.SpriteMaterial).dispose();
