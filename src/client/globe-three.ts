@@ -48,7 +48,7 @@ type GlobeThreeOptions = {
 export type StarlinkTlePair = [string, string];
 
 /** Survives React remounts / StrictMode — Alan fx5 ~10s snap-back */
-export type GlobeViewPose = { theta: number; phi: number; camYaw?: number };
+export type GlobeViewPose = { theta: number; phi: number; camYaw?: number; framed?: boolean };
 const VIEW_POSE_KEY = "ionize-view-pose";
 const VIEW_PHI_DEFAULT = 0.18;
 /** Camera orbit distance (Aura R3); yaw frames sun on right limb without faking sunDir */
@@ -68,6 +68,7 @@ function readStoredViewPose(): GlobeViewPose {
       phi: Number.isFinite(p.phi) ? clampPhi(p.phi as number) : VIEW_PHI_DEFAULT,
     };
     if (Number.isFinite(p.camYaw)) pose.camYaw = p.camYaw as number;
+    if (p.framed === true) pose.framed = true;
     return pose;
   } catch {
     return { theta: 0, phi: VIEW_PHI_DEFAULT };
@@ -102,6 +103,11 @@ function persistViewPose(
     theta,
     phi,
     camYaw: camYaw !== undefined ? camYaw : memViewPose.camYaw,
+    // Only mark framed when we persist an explicit post-frame camYaw
+    framed:
+      camYaw !== undefined
+        ? true
+        : memViewPose.framed === true && memViewPose.camYaw !== undefined,
   };
   try {
     sessionStorage.setItem(VIEW_POSE_KEY, JSON.stringify(memViewPose));
@@ -121,7 +127,7 @@ const CLOUD_TEX_FALLBACK =
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
 export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 /** ISS far-side dim + visitor ripple markers */
-export const GLOBE_FX_BUILD = "fx8-20261028-sun-daybright";
+export const GLOBE_FX_BUILD = "fx9-20261028-half-lit";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -269,7 +275,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const scene = new THREE.Scene();
   // R3 crop fix: z 2.65→3.05 + y→0 so haze/orbit clear frustum; FOV stays 44
   // (Aura's 38–40 FOV would tighten the cone — Alan: pull back instead)
-  const camera = new THREE.PerspectiveCamera(44, 1, 0.1, 100);
+  // FOV 44→52: square canvas (aspect=1) otherwise clips right-limb sun (ndc>1 at facing≈0.12)
+  const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 100);
   camera.position.set(0, 0, CAM_DIST);
 
   // Pivot: Earth rotates under a *world-fixed* sun (terminator stays real)
@@ -1495,12 +1502,12 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   // Camera yaw orbits around Y so world-fixed sun can sit on the RIGHT limb.
   // viewTheta only spins Earth under the sun — it cannot move the glyph on screen.
   let camYaw = typeof memViewPose.camYaw === "number" ? memViewPose.camYaw : 0;
-  // Only skip auto-frame when an explicit camYaw was stored (old poses without camYaw must frame)
-  let sunFramed = typeof memViewPose.camYaw === "number";
+  // Require framed:true — fx8 could persist camYaw:0 before first frame and skip forever
+  let sunFramed = memViewPose.framed === true && typeof memViewPose.camYaw === "number";
   let lastPosePersist = 0;
   const camAlong = new THREE.Vector3();
-  /** Target sun·cam ≈ +0.12 so disk is slightly >half lit and glyph sits just outside limb. */
-  const RIGHT_LIMB_FACING = 0.12;
+  /** Target sun·cam for ~50% lit (lit≈0.5+0.5*f). Aura ~50/50; range 0.05–0.18. */
+  const TARGET_FACING = 0.08;
 
   function applyCameraYaw() {
     camera.position.set(CAM_DIST * Math.sin(camYaw), 0, CAM_DIST * Math.cos(camYaw));
@@ -1508,17 +1515,74 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   }
   applyCameraYaw();
 
+  function measureFacing() {
+    camAlong.copy(camera.position).normalize();
+    return liveSun.dot(camAlong);
+  }
+
   /**
-   * Place sun glyph near the right limb (half-lit disk) without biasing sunDir.
-   * Empirically verified: atan2(sx,sz) - π/2 puts sun on camera +X (screen right);
-   * +π/2 puts it on the left. Parent brief said "+", but +X check wins.
+   * Solve camYaw for targetFacing with sun on screen RIGHT.
+   * Old az−π/2+bias does NOT guarantee facing≈bias (equals r·sin(bias)); also
+   * premature camYaw:0 persist left the default night crescent (facing≈−0.55).
    */
   function frameSunToRightLimb() {
-    const az = Math.atan2(liveSun.x, liveSun.z);
-    // Base limb (facing≈0, sun on +X) then bias camera slightly toward sun
-    camYaw = az - Math.PI / 2 + RIGHT_LIMB_FACING;
+    const sx = liveSun.x;
+    const sz = liveSun.z;
+    const r = Math.hypot(sx, sz) || 1e-6;
+    const F = THREE.MathUtils.clamp(TARGET_FACING, -0.9, 0.9);
+    const cosA = THREE.MathUtils.clamp(F / r, -1, 1);
+    const alpha = Math.acos(cosA);
+    const az = Math.atan2(sx, sz);
+    // Two yaws give same |facing|; pick sun on camera +X (screen right)
+    const candidates = [az - alpha, az + alpha];
+    let best = candidates[0];
+    let bestScore = -Infinity;
+    for (const yaw of candidates) {
+      const cx = Math.sin(yaw);
+      const cz = Math.cos(yaw);
+      const facingXZ = sx * cx + sz * cz;
+      // right after lookAt = cross(forward, up), forward=-cam → (cz, 0, -cx)
+      const sunRight = sx * cz + sz * -cx;
+      const score = (sunRight > 0 ? 10 : -10) + facingXZ;
+      if (score > bestScore) {
+        bestScore = score;
+        best = yaw;
+      }
+    }
+    camYaw = best;
     applyCameraYaw();
+    let facing = measureFacing();
+
+    // Verify / binary-search nudge if residual > 0.08 (should be rare — cam on equator)
+    if (Math.abs(facing - TARGET_FACING) > 0.08) {
+      let lo = best - 0.75;
+      let hi = best + 0.75;
+      for (let i = 0; i < 8; i++) {
+        const mid = 0.5 * (lo + hi);
+        camYaw = mid;
+        applyCameraYaw();
+        facing = measureFacing();
+        // Moving yaw toward sun az increases facing; sun az is atan2(sx,sz)
+        // Sign: d(facing)/d(yaw) = sx*cos(yaw) - sz*sin(yaw)
+        const dF = sx * Math.cos(mid) - sz * Math.sin(mid);
+        if ((facing < TARGET_FACING && dF > 0) || (facing > TARGET_FACING && dF < 0)) {
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      camYaw = 0.5 * (lo + hi);
+      applyCameraYaw();
+      facing = measureFacing();
+    }
+
     sunFramed = true;
+    console.debug("[ionize-sun]", {
+      facing,
+      targetFacing: TARGET_FACING,
+      camYaw,
+      litApprox: 0.5 + 0.5 * facing,
+    });
     persistViewPose(viewTheta, viewPhi, camYaw, globeId);
   }
   const DRAG_PHI_MIN = -0.85;
@@ -1575,7 +1639,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     dragVelY = dx * DRAG_SENS;
     dragVelX = dy * DRAG_SENS;
     // Persist every move so remount cannot restore a stale mid-drag snapshot (E3)
-    persistViewPose(viewTheta, viewPhi, camYaw, globeId);
+    // Do not write camYaw until framed — premature 0 makes next mount skip framing (fx8 crescent)
+    persistViewPose(viewTheta, viewPhi, sunFramed ? camYaw : undefined, globeId);
     lastPosePersist = performance.now();
   }
   function onPointerUp(e: PointerEvent) {
@@ -1686,15 +1751,28 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const sunFade = hideBehind; // ≈1 for facing ≳ -0.05 (limb + day side)
     const limbOut =
       0.1 * (1 - THREE.MathUtils.smoothstep(Math.abs(sunFacing), 0.0, 0.4));
-    const sunR = 1.32 + limbOut;
-    const beamR = 1.24 + limbOut * 0.85;
+    let sunR = 1.28 + limbOut;
+    let beamR = 1.2 + limbOut * 0.85;
+    // Project glyph; if near right canvas edge, pull in + shrink beam (Aura flat clip)
+    tmp.copy(liveSun).multiplyScalar(sunR);
+    tmp.project(camera);
+    const ndcX = tmp.x;
+    if (ndcX > 0.85) {
+      const t = THREE.MathUtils.clamp((ndcX - 0.85) / 0.2, 0, 1);
+      sunR *= 1 - 0.18 * t;
+      beamR *= 1 - 0.28 * t;
+    }
     sunSprite.position.copy(liveSun).multiplyScalar(sunR);
     sunBeam.position.copy(liveSun).multiplyScalar(beamR);
     (sunSprite.material as THREE.SpriteMaterial).opacity = 1.0 * sunFade;
     (sunBeam.material as THREE.SpriteMaterial).opacity = 0.55 * sunFade;
     const sunPulse = 0.5 + 0.5 * Math.sin(time * 0.002);
-    sunSprite.scale.setScalar(0.3 + 0.05 * sunPulse);
-    sunBeam.scale.setScalar(0.55 + 0.08 * sunPulse);
+    let beamScale = 0.5 + 0.07 * sunPulse;
+    if (ndcX > 0.85) {
+      beamScale *= 1 - 0.35 * THREE.MathUtils.clamp((ndcX - 0.85) / 0.2, 0, 1);
+    }
+    sunSprite.scale.setScalar(0.28 + 0.05 * sunPulse);
+    sunBeam.scale.setScalar(beamScale);
 
     // Orbit rebuild whenever TLE is available
     if (showIss && ensureSatrec() && (time - lastOrbitBuild > 20_000 || lastOrbitBuild === 0)) {
@@ -1791,7 +1869,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const persistEvery = interactionMode === "drag" ? 50 : 250;
     if (time - lastPosePersist > persistEvery) {
       lastPosePersist = time;
-      persistViewPose(viewTheta, viewPhi, camYaw, globeId);
+      persistViewPose(viewTheta, viewPhi, sunFramed ? camYaw : undefined, globeId);
     }
 
     root.updateMatrixWorld(true);
@@ -1807,7 +1885,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   return {
     destroy() {
-      persistViewPose(viewTheta, viewPhi, camYaw, globeId);
+      persistViewPose(viewTheta, viewPhi, sunFramed ? camYaw : undefined, globeId);
       running = false;
       cancelAnimationFrame(raf);
       liveLoadToken += 1;
