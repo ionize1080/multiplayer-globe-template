@@ -9,9 +9,11 @@ import type { OutgoingMessage } from "../shared";
 import {
   createGlobeThree,
   LIVE_CLOUDS_BUILD,
+  GLOBE_FX_BUILD,
   type CloudMode,
   type IssSnapshot,
   type LatLngMarker,
+  type StarlinkTlePair,
 } from "./globe-three";
 
 type MarketQuote = {
@@ -76,6 +78,16 @@ type CloudMetaPayload = {
   refreshedAt: string;
   lagNote: string;
 };
+
+type StarlinkStats = {
+  ok: true;
+  count: number;
+  source: string;
+  fetchedAt: string;
+  note?: string;
+};
+
+type InteractionMode = "rotate" | "drag";
 
 const CLOCKS: ClockZone[] = [
   { id: "sg", label: "SGT", city: "Singapore", timeZone: "Asia/Singapore" },
@@ -329,32 +341,87 @@ function App() {
 
   const [liveIss, setLiveIss] = useState<IssSnapshot | null>(null);
 
+  const [showIss, setShowIss] = useState(true);
+  const showIssRef = useRef(showIss);
+  useEffect(() => {
+    showIssRef.current = showIss;
+  }, [showIss]);
+
+  const [showStarlink, setShowStarlink] = useState(false);
+  const showStarlinkRef = useRef(showStarlink);
+  useEffect(() => {
+    showStarlinkRef.current = showStarlink;
+  }, [showStarlink]);
+
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>(() => {
+    try {
+      return sessionStorage.getItem("ionize-interaction") === "drag" ? "drag" : "rotate";
+    } catch {
+      return "rotate";
+    }
+  });
+  const interactionModeRef = useRef(interactionMode);
+  useEffect(() => {
+    interactionModeRef.current = interactionMode;
+    try {
+      sessionStorage.setItem("ionize-interaction", interactionMode);
+    } catch {
+      /* ignore */
+    }
+  }, [interactionMode]);
+
+  // Starlink density (drawn count) + brightness — fx4 defaults
+  const [starlinkDensity, setStarlinkDensity] = useState(2200);
+  const starlinkDensityRef = useRef(starlinkDensity);
+  useEffect(() => {
+    starlinkDensityRef.current = starlinkDensity;
+  }, [starlinkDensity]);
+  const [starlinkBrightness, setStarlinkBrightness] = useState(0.42);
+  const starlinkBrightnessRef = useRef(starlinkBrightness);
+  useEffect(() => {
+    starlinkBrightnessRef.current = starlinkBrightness;
+  }, [starlinkBrightness]);
+  const [starlinkDrawn, setStarlinkDrawn] = useState(0);
+
+  const [starlinkStats, setStarlinkStats] = useState<StarlinkStats | null>(null);
+  const [starlinkError, setStarlinkError] = useState<string | null>(null);
+  const [starlinkLoading, setStarlinkLoading] = useState(false);
+  const starlinkLoadedRef = useRef(false);
+
   const positions = useRef<Map<string, LatLngMarker>>(new Map());
   const socketIdRef = useRef<string | null>(null);
+
+  const socketIdLiveRef = useRef<string | null>(null);
+  const onPartyMessage = useRef<(evt: MessageEvent) => void>(() => {});
+  onPartyMessage.current = (evt: MessageEvent) => {
+    const message = JSON.parse(evt.data as string) as OutgoingMessage;
+    if (message.type === "add-marker") {
+      const pos = message.position;
+      if (!pos || !Number.isFinite(pos.lat) || !Number.isFinite(pos.lng)) return;
+      const sid = socketIdLiveRef.current;
+      positions.current.set(pos.id, {
+        id: pos.id,
+        lat: pos.lat,
+        lng: pos.lng,
+        size: pos.id === sid ? 0.12 : 0.08,
+        self: pos.id === sid,
+      });
+      setCounter(positions.current.size);
+    } else if (message.type === "remove-marker") {
+      positions.current.delete(message.id);
+      setCounter(positions.current.size);
+    }
+  };
 
   const socket = usePartySocket({
     room: "default",
     party: "globe",
     onMessage(evt) {
-      const message = JSON.parse(evt.data as string) as OutgoingMessage;
-      if (message.type === "add-marker") {
-        const pos = message.position;
-        if (!pos || !Number.isFinite(pos.lat) || !Number.isFinite(pos.lng)) return;
-        positions.current.set(pos.id, {
-          id: pos.id,
-          lat: pos.lat,
-          lng: pos.lng,
-          size: pos.id === socket.id ? 0.12 : 0.08,
-          self: pos.id === socket.id,
-        });
-        socketIdRef.current = socket.id;
-        setCounter(positions.current.size);
-      } else if (message.type === "remove-marker") {
-        positions.current.delete(message.id);
-        setCounter(positions.current.size);
-      }
+      onPartyMessage.current(evt as MessageEvent);
     },
   });
+  socketIdLiveRef.current = socket.id;
+  socketIdRef.current = socket.id;
 
   useEffect(() => {
     const canvas = canvasRef.current as HTMLCanvasElement | undefined;
@@ -370,9 +437,12 @@ function App() {
     return () => canvas.removeEventListener("wheel", handleWheel);
   }, []);
 
+  // Keep WebGL alive across React re-renders / StrictMode / dashboard polls.
+  // Destroying here caused Alan fx5 ~10s delayed snap-back to default pose.
   useEffect(() => {
     const canvas = canvasRef.current as HTMLCanvasElement | undefined;
     if (!canvas) return;
+    if (globeApiRef.current) return; // already running — do not recreate
 
     const globe = createGlobeThree({
       canvas,
@@ -380,14 +450,38 @@ function App() {
       getCloudAmount: () => cloudAmountRef.current,
       getMarkers: () => [...positions.current.values()],
       getTle: () => tleRef.current,
-      onIssUpdate: (iss) => setLiveIss(iss),
+      onIssUpdate: (iss) => {
+        setLiveIss((prev) => {
+          if (
+            prev &&
+            iss &&
+            Math.abs(prev.latitude - iss.latitude) < 1e-4 &&
+            Math.abs(prev.longitude - iss.longitude) < 1e-4
+          ) {
+            return prev;
+          }
+          return iss;
+        });
+      },
+      getShowIss: () => showIssRef.current,
+      getShowStarlink: () => showStarlinkRef.current,
+      getStarlinkDensity: () => starlinkDensityRef.current,
+      getStarlinkBrightness: () => starlinkBrightnessRef.current,
+      getInteractionMode: () => interactionModeRef.current,
     });
     globeApiRef.current = globe;
+    // no cleanup destroy — pagehide below
+  }, []);
 
-    return () => {
+  useEffect(() => {
+    const onHide = () => {
+      const g = globeApiRef.current;
+      if (!g) return;
       globeApiRef.current = null;
-      globe.destroy();
+      g.destroy();
     };
+    window.addEventListener("pagehide", onHide);
+    return () => window.removeEventListener("pagehide", onHide);
   }, []);
 
   // Near-realtime clouds: fetch NASA mosaic via Worker proxy; refresh ~2h
@@ -454,6 +548,128 @@ function App() {
     };
   }, [cloudMode]);
 
+  // Starlink catalog via Worker proxy — load when layer enabled (retry + always clear loading)
+  useEffect(() => {
+    if (!showStarlink) {
+      globeApiRef.current?.setStarlinkTles(null);
+      setStarlinkLoading(false);
+      setStarlinkError(null);
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const ac = new AbortController();
+
+    async function loadOnce(attempt: number): Promise<boolean> {
+      const res = await fetch("/api/starlink?tles=1&max=8000", {
+        signal: ac.signal,
+      });
+      const data = (await res.json()) as
+        | (StarlinkStats & { tles: StarlinkTlePair[]; drawn?: number })
+        | { ok: false; error?: string };
+      if (!res.ok || !("ok" in data) || data.ok !== true) {
+        throw new Error(
+          "error" in data && data.error ? String(data.error) : `starlink → ${res.status}`,
+        );
+      }
+      if (cancelled) return false;
+      const tles = data.tles || [];
+      if (!tles.length) throw new Error("starlink empty tles");
+      setStarlinkStats({
+        ok: true,
+        count: data.count,
+        source: data.source,
+        fetchedAt: data.fetchedAt,
+        note:
+          ("note" in data && data.note) ||
+          (data.drawn != null ? `drawing ${data.drawn}` : undefined),
+      });
+      // Yield so StrictMode / paint can settle before heavy satrec parse
+      await new Promise((r) => setTimeout(r, 0));
+      if (cancelled) return false;
+      globeApiRef.current?.setStarlinkTles(tles);
+      starlinkLoadedRef.current = true;
+      setStarlinkError(null);
+      return true;
+    }
+
+    async function load() {
+      setStarlinkLoading(true);
+      setStarlinkError(null);
+      let lastErr: unknown;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        if (cancelled) break;
+        try {
+          const ok = await loadOnce(attempt);
+          if (ok || cancelled) {
+            lastErr = null;
+            break;
+          }
+        } catch (e) {
+          lastErr = e;
+          console.warn(`starlink load attempt ${attempt} failed`, e);
+          if (cancelled || ac.signal.aborted) break;
+          await new Promise((r) => setTimeout(r, 400 * attempt));
+        }
+      }
+      if (!cancelled) {
+        if (lastErr) {
+          setStarlinkError(String(lastErr));
+          globeApiRef.current?.setStarlinkTles(null);
+        }
+        setStarlinkLoading(false);
+      }
+    }
+
+    void load();
+    timer = setInterval(load, 30 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      ac.abort();
+      if (timer) clearInterval(timer);
+      setStarlinkLoading(false);
+    };
+  }, [showStarlink]);
+
+  // Reflect live drawn count from globe (density slider)
+  useEffect(() => {
+    if (!showStarlink) {
+      setStarlinkDrawn(0);
+      return;
+    }
+    const id = window.setInterval(() => {
+      const n = globeApiRef.current?.getStarlinkDrawn?.() ?? 0;
+      setStarlinkDrawn(n);
+    }, 500);
+    return () => clearInterval(id);
+  }, [showStarlink, starlinkDensity]);
+
+    // Stats-only prefetch so panel can show count even before enabling layer
+  useEffect(() => {
+    let cancelled = false;
+    async function peek() {
+      try {
+        const res = await fetch("/api/starlink?tles=0");
+        const data = (await res.json()) as StarlinkStats | { ok: false; error?: string };
+        if (!res.ok || !("ok" in data) || data.ok !== true) return;
+        if (!cancelled) {
+          setStarlinkStats({
+            ok: true,
+            count: data.count,
+            source: data.source,
+            fetchedAt: data.fetchedAt,
+          });
+        }
+      } catch {
+        /* optional peek */
+      }
+    }
+    void peek();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const clocks = CLOCKS.map((z) => {
     const time = new Intl.DateTimeFormat("en-GB", {
       timeZone: z.timeZone,
@@ -491,7 +707,7 @@ function App() {
           <span className="brand-mark" aria-hidden />
           <div>
             <h1>ionize.club</h1>
-            <p className="tagline">Live globe · markets · ISS orbit</p>
+            <p className="tagline">Live globe · ISS · Starlink · markets</p>
           </div>
         </div>
         <div className="live-pill" title="People currently connected">
@@ -586,7 +802,11 @@ function App() {
                   </div>
                 </div>
               </div>
-              <p className="hint">Cyan orbit · amber visitors · metallic ISS on the globe</p>
+              <p className="hint">
+                {showIss
+                  ? "Cyan orbit · TLE/SGP4 · dims when behind Earth"
+                  : "ISS layer off — enable in Controls"}
+              </p>
             </section>
           ) : (
             <section className="card error-card">
@@ -594,6 +814,79 @@ function App() {
               <p>Orbit feed offline</p>
             </section>
           )}
+
+          <section className="card starlink-card">
+            <div className="card-head">
+              <h2>Starlink</h2>
+              <span className="chip">{showStarlink ? "layer on" : "layer off"}</span>
+            </div>
+            {starlinkLoading && !starlinkStats ? (
+              <p className="hint">Loading Celestrak catalog…</p>
+            ) : starlinkStats ? (
+              <div className="iss-stats">
+                <div>
+                  <span className="muted">Catalog sats</span>
+                  <strong>{starlinkStats.count.toLocaleString()}</strong>
+                </div>
+                <div>
+                  <span className="muted">Source</span>
+                  <strong className="cap" style={{ fontSize: "0.78rem" }}>
+                    {starlinkStats.source}
+                  </strong>
+                </div>
+                <div>
+                  <span className="muted">Fetched</span>
+                  <strong>
+                    {new Intl.DateTimeFormat("en-GB", {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      hour12: false,
+                      timeZone: "Asia/Singapore",
+                    }).format(new Date(starlinkStats.fetchedAt))}{" "}
+                    SGT
+                  </strong>
+                </div>
+              </div>
+            ) : (
+              <p className="hint">Stats unavailable{starlinkError ? ` · ${starlinkError}` : ""}</p>
+            )}
+            {showStarlink ? (
+              <div className="starlink-sliders">
+                <label htmlFor="starlinkDensity">
+                  Density <b>{starlinkDrawn || starlinkDensity}</b>
+                  <span className="muted"> / target {starlinkDensity}</span>
+                </label>
+                <input
+                  id="starlinkDensity"
+                  type="range"
+                  min={500}
+                  max={8000}
+                  step={100}
+                  value={starlinkDensity}
+                  onChange={(e) => setStarlinkDensity(parseInt(e.target.value, 10))}
+                />
+                <label htmlFor="starlinkBright">
+                  Brightness <b>{Math.round(starlinkBrightness * 100)}%</b>
+                </label>
+                <input
+                  id="starlinkBright"
+                  type="range"
+                  min={0.05}
+                  max={1}
+                  step={0.01}
+                  value={starlinkBrightness}
+                  onChange={(e) => setStarlinkBrightness(parseFloat(e.target.value))}
+                />
+              </div>
+            ) : null}
+            <p className="hint">
+              {showStarlink
+                ? `Drawing ${starlinkDrawn || "…"} pts · bright ${Math.round(starlinkBrightness * 100)}% · chunked SGP4`
+                : "Enable Starlink in Controls · density & brightness sliders appear here"}
+              {starlinkLoading ? " · updating…" : ""}
+              {starlinkError ? ` · ${starlinkError}` : ""}
+            </p>
+          </section>
         </aside>
 
         <section className="stage">
@@ -610,11 +903,37 @@ function App() {
             </div>
           </div>
           <div className="globe-legend" aria-hidden>
-            <span className="legend-dot iss" /> ISS orbit
+            <span className="legend-dot iss" /> ISS
             <span className="legend-dot visitor" /> visitors
+            <span className="legend-dot starlink" /> Starlink
+            <span className="legend-dot sun" /> Sun
           </div>
 
           <div className="speed-control card inline-card controls-row">
+            <div className="control-block">
+              <span className="cloud-mode-label">交互模式</span>
+              <div className="segmented" role="group" aria-label="交互模式">
+                <button
+                  type="button"
+                  className={interactionMode === "rotate" ? "seg active" : "seg"}
+                  onClick={() => setInteractionMode("rotate")}
+                >
+                  自转
+                </button>
+                <button
+                  type="button"
+                  className={interactionMode === "drag" ? "seg active" : "seg"}
+                  onClick={() => setInteractionMode("drag")}
+                >
+                  拖拽
+                </button>
+              </div>
+              <p className="cloud-status" style={{ opacity: 0.75 }}>
+                {interactionMode === "drag"
+                  ? "拖拽旋转地球 · 松手有惯性 · 自转暂停"
+                  : "自动缓转 · 可调速度"}
+              </p>
+            </div>
             <div className="control-block">
               <label htmlFor="speedRange">
                 Rotation <b>{rotationSpeed.toFixed(3)}</b>
@@ -626,8 +945,58 @@ function App() {
                 max="0.03"
                 step="0.001"
                 value={rotationSpeed}
+                disabled={interactionMode === "drag"}
                 onChange={(e) => setRotationSpeed(parseFloat(e.target.value))}
               />
+            </div>
+            <div className="control-block">
+              <span className="cloud-mode-label">图层 · {GLOBE_FX_BUILD}</span>
+              <div className="layer-toggles">
+                <label className="layer-toggle">
+                  <input
+                    type="checkbox"
+                    checked={showIss}
+                    onChange={(e) => setShowIss(e.target.checked)}
+                  />
+                  <span>ISS</span>
+                </label>
+                <label className="layer-toggle">
+                  <input
+                    type="checkbox"
+                    checked={showStarlink}
+                    onChange={(e) => setShowStarlink(e.target.checked)}
+                  />
+                  <span>Starlink</span>
+                </label>
+              </div>
+              {showStarlink ? (
+                <div className="starlink-sliders compact">
+                  <label htmlFor="starlinkDensityCtrl">
+                    SL density <b>{starlinkDensity}</b>
+                  </label>
+                  <input
+                    id="starlinkDensityCtrl"
+                    type="range"
+                    min={500}
+                    max={8000}
+                    step={100}
+                    value={starlinkDensity}
+                    onChange={(e) => setStarlinkDensity(parseInt(e.target.value, 10))}
+                  />
+                  <label htmlFor="starlinkBrightCtrl">
+                    SL brightness <b>{Math.round(starlinkBrightness * 100)}%</b>
+                  </label>
+                  <input
+                    id="starlinkBrightCtrl"
+                    type="range"
+                    min={0.05}
+                    max={1}
+                    step={0.01}
+                    value={starlinkBrightness}
+                    onChange={(e) => setStarlinkBrightness(parseFloat(e.target.value))}
+                  />
+                </div>
+              ) : null}
             </div>
             <div className="control-block">
               <label htmlFor="cloudRange">
@@ -752,7 +1121,7 @@ function App() {
       <footer className="footer">
         <span>
           Powered by <a href="https://threejs.org/">three.js</a>,{" "}
-          <a href="https://npmjs.com/package/partyserver/">PartyServer</a>, Celestrak TLE,
+          <a href="https://npmjs.com/package/partyserver/">PartyServer</a>, Celestrak TLE (ISS + Starlink),
           Open-Meteo, WhereTheISS.at & Yahoo Finance · Earth: NASA Blue Marble · clouds: animated webgl-earth / near-realtime NASA GIBS true-color → cloud mask
         </span>
       </footer>
