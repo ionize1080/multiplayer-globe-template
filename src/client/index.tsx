@@ -311,6 +311,10 @@ function App() {
   }, [cloudAmount]);
 
   const [cloudMode, setCloudMode] = useState<CloudMode>("animated");
+  const cloudModeRef = useRef<CloudMode>(cloudMode);
+  useEffect(() => {
+    cloudModeRef.current = cloudMode;
+  }, [cloudMode]);
   const [cloudStatus, setCloudStatus] = useState("");
   const [cloudDate, setCloudDate] = useState<string | null>(null);
   const globeApiRef = useRef<ReturnType<typeof createGlobeThree> | null>(null);
@@ -410,12 +414,16 @@ function App() {
           url: `${meta.texturePath}?d=${encodeURIComponent(meta.date)}&v=${encodeURIComponent(LIVE_CLOUDS_BUILD)}`,
           date: meta.date,
         });
-        if (cancelled) return;
         // Superseded load (StrictMode / rapid toggle) — keep UI on live, newer run wins
         if (!result.ok && result.error === "stale") return;
         if (!result.ok) throw new Error(result.error || "setCloudSource failed");
-        setCloudDate(meta.date);
-        setCloudStatus(`近实时 · ${meta.date} UTC · ${LIVE_CLOUDS_BUILD}`);
+        // Always clear loading once texture applied if user still wants live
+        // (don't leave status stuck on 加载… when cancelled flips during success)
+        if (cloudModeRef.current === "live") {
+          setCloudDate(meta.date);
+          setCloudStatus(`近实时 · ${meta.date} UTC · ${LIVE_CLOUDS_BUILD}`);
+        }
+        if (cancelled) return;
       } catch (e) {
         if (cancelled) return;
         console.warn("live clouds failed", e);
