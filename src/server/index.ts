@@ -363,10 +363,13 @@ export class Globe extends Server {
 
     for (const connection of this.getConnections<ConnectionState>()) {
       try {
+        const existing = connection.state?.position;
+        // Skip ghost sockets that never got a CF lat/lng (no marker state)
+        if (!existing) continue;
         conn.send(
           JSON.stringify({
             type: "add-marker",
-            position: connection.state!.position,
+            position: existing,
           } satisfies OutgoingMessage),
         );
 

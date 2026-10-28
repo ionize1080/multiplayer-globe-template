@@ -372,7 +372,7 @@ a:hover {
 
 .globe-wrap {
   position: relative;
-  width: min(100%, 640px);
+  width: min(100%, 700px);
   aspect-ratio: 1 / 1;
   display: block;
   overflow: visible;
@@ -403,10 +403,9 @@ a:hover {
 }
 
 .globe-legend {
-  position: absolute;
-  bottom: 4%;
-  left: 50%;
-  transform: translateX(-50%);
+  position: relative;
+  margin: 0.55rem auto 0;
+  width: fit-content;
   display: flex;
   align-items: center;
   gap: 0.55rem;
@@ -420,6 +419,7 @@ a:hover {
   text-transform: uppercase;
   pointer-events: none;
   backdrop-filter: blur(8px);
+  z-index: 2;
 }
 
 .legend-dot {
@@ -680,6 +680,6 @@ a:hover {
     grid-template-columns: 1fr;
   }
   .globe-wrap {
-    width: min(100%, 520px);
+    width: min(100%, 560px);
   }
 }

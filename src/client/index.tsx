@@ -315,16 +315,18 @@ function App() {
     onMessage(evt) {
       const message = JSON.parse(evt.data as string) as OutgoingMessage;
       if (message.type === "add-marker") {
-        positions.current.set(message.position.id, {
-          id: message.position.id,
-          lat: message.position.lat,
-          lng: message.position.lng,
-          size: message.position.id === socket.id ? 0.12 : 0.08,
-          self: message.position.id === socket.id,
+        const pos = message.position;
+        if (!pos || !Number.isFinite(pos.lat) || !Number.isFinite(pos.lng)) return;
+        positions.current.set(pos.id, {
+          id: pos.id,
+          lat: pos.lat,
+          lng: pos.lng,
+          size: pos.id === socket.id ? 0.12 : 0.08,
+          self: pos.id === socket.id,
         });
         socketIdRef.current = socket.id;
         setCounter(positions.current.size);
-      } else {
+      } else if (message.type === "remove-marker") {
         positions.current.delete(message.id);
         setCounter(positions.current.size);
       }
@@ -515,10 +517,10 @@ function App() {
                 className="globe-canvas"
               />
             </div>
-            <div className="globe-legend" aria-hidden>
-              <span className="legend-dot iss" /> ISS orbit
-              <span className="legend-dot visitor" /> visitors
-            </div>
+          </div>
+          <div className="globe-legend" aria-hidden>
+            <span className="legend-dot iss" /> ISS orbit
+            <span className="legend-dot visitor" /> visitors
           </div>
 
           <div className="speed-control card inline-card controls-row">

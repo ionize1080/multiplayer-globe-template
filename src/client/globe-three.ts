@@ -126,7 +126,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(44, 1, 0.1, 100);
-  camera.position.set(0, 0.18, 2.95);
+  camera.position.set(0, 0.12, 2.65);
 
   // Pivot: Earth rotates under a *world-fixed* sun (terminator stays real)
   const root = new THREE.Group();
@@ -150,7 +150,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const sunDir = new THREE.Vector3(1, 0, 0);
   // Earth
   const earthGroup = new THREE.Group();
-  earthGroup.scale.setScalar(0.96);
+  earthGroup.scale.setScalar(1.0);
   root.add(earthGroup);
 
   const earthGeo = new THREE.SphereGeometry(1, 96, 96);
@@ -167,8 +167,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     uNightMap: { value: null as THREE.Texture | null },
     uSunDir: { value: sunDir.clone() },
     uDayBoost: { value: 1.28 },
-    uNightFloor: { value: 0.38 },
-    uCityBoost: { value: 1.75 },
+    uNightFloor: { value: 0.28 },
+    uCityBoost: { value: 2.8 },
     uTermSoft: { value: 0.32 },
   };
 
@@ -215,14 +215,16 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         dayCol = mix(dayCol, dayCol * vec3(1.08, 1.02, 0.92), 0.35);
         dayCol = mix(vec3(dot(dayCol, vec3(0.299, 0.587, 0.114))), dayCol, 1.18);
         vec3 nightTex = texture2D(uNightMap, vDnUv).rgb;
-        vec3 nightCol = nightTex * uCityBoost + vec3(0.04, 0.06, 0.12);
-        nightCol = max(nightCol, vec3(uNightFloor * 0.55));
-        // Soft mix: never pure black night
+        // City lights dominate night; soft blue floor so it never goes dead black
+        vec3 cities = nightTex * nightTex * uCityBoost; // square to punch bright pixels
+        vec3 nightCol = cities + vec3(0.035, 0.05, 0.1) * uNightFloor;
+        nightCol = max(nightCol, vec3(uNightFloor * 0.4));
         diffuseColor.rgb = mix(nightCol, dayCol, dayF);
-        diffuseColor.rgb += nightTex * uCityBoost * 0.18 * (1.0 - dayF) * dayF * 4.0;`,
+        // Dusk city bleed near terminator
+        diffuseColor.rgb += cities * 0.35 * (1.0 - dayF) * dayF * 4.0;`,
       );
   };
-  earthMat.customProgramCacheKey = () => "earth-day-night-r1";
+  earthMat.customProgramCacheKey = () => "earth-day-night-r2";
 
   const earth = new THREE.Mesh(earthGeo, earthMat);
   earthGroup.add(earth);
@@ -235,12 +237,25 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     earthMat.map = day;
     earthMat.needsUpdate = true;
   });
-  loader.load(`${TEX}/earth-night.jpg`, (night) => {
+  const NIGHT_LIGHTS =
+    "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_lights_2048.png";
+  const NIGHT_FALLBACK = `${TEX}/earth-night.jpg`;
+  function applyNightMap(night: THREE.Texture) {
     night.colorSpace = THREE.SRGBColorSpace;
     night.anisotropy = 8;
     dayNightUniforms.uNightMap.value = night;
+    // Also drive emissiveMap so MeshStandard path contributes city glow
+    earthMat.emissiveMap = night;
+    earthMat.emissive = new THREE.Color(0xfff4e0);
+    earthMat.emissiveIntensity = 0.55;
     earthMat.needsUpdate = true;
-  });
+  }
+  loader.load(
+    NIGHT_LIGHTS,
+    applyNightMap,
+    undefined,
+    () => loader.load(NIGHT_FALLBACK, applyNightMap),
+  );
   loader.load(`${TEX}/earth-water.png`, (waterTex) => {
     earthMat.roughnessMap = waterToSoftRoughnessMap(waterTex);
     earthMat.roughness = 1;
@@ -414,22 +429,41 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const markerMatSelf = new THREE.MeshStandardMaterial({
     color: 0xfff7ed,
     emissive: 0xfbbf24,
-    emissiveIntensity: 0.7,
+    emissiveIntensity: 0.85,
     roughness: 0.4,
     metalness: 0.15,
+    depthTest: false,
+    depthWrite: false,
   });
   const markerMatOther = new THREE.MeshStandardMaterial({
     color: 0xfed7aa,
     emissive: 0xf59e0b,
-    emissiveIntensity: 0.45,
+    emissiveIntensity: 0.55,
     roughness: 0.45,
     metalness: 0.1,
+    depthTest: false,
+    depthWrite: false,
   });
   const markerPool: THREE.Mesh[] = [];
+
+  function hashJitter(id: string): { dLat: number; dLng: number; dAlt: number } {
+    let h = 0;
+    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+    const a = ((h >>> 0) % 1000) / 1000;
+    const b = (((h >>> 10) % 1000) / 1000);
+    // Spread coincident visitors (~±0.35°) so stacked same-city dots separate
+    return {
+      dLat: (a - 0.5) * 0.7,
+      dLng: (b - 0.5) * 0.7,
+      dAlt: 14 + ((h >>> 20) % 10),
+    };
+  }
 
   function syncMarkers(list: LatLngMarker[]) {
     while (markerPool.length < list.length) {
       const m = new THREE.Mesh(markerGeo, markerMatOther);
+      m.renderOrder = 12;
+      m.frustumCulled = false;
       markerPool.push(m);
       markerGroup.add(m);
     }
@@ -442,8 +476,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       }
       mesh.visible = true;
       mesh.material = data.self ? markerMatSelf : markerMatOther;
-      mesh.scale.setScalar(Math.max(0.01, Math.min(0.028, data.size * 0.22)));
-      latLngAltToVec3(data.lat, data.lng, 12, mesh.position);
+      (mesh.material as THREE.MeshStandardMaterial).depthTest = false;
+      (mesh.material as THREE.MeshStandardMaterial).depthWrite = false;
+      mesh.scale.setScalar(Math.max(0.014, Math.min(0.036, data.size * 0.28)));
+      const j = hashJitter(data.id);
+      latLngAltToVec3(data.lat + j.dLat, data.lng + j.dLng, j.dAlt, mesh.position);
     }
   }
 
@@ -479,22 +516,58 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   earthGroup.add(orbitGlow);
 
   const iss = createIssModel();
-  iss.scale.setScalar(0.042);
+  // ~1.8× prior so model reads at default zoom (Alan/Aura R2)
+  iss.scale.setScalar(0.078);
+  iss.renderOrder = 20;
+  iss.frustumCulled = false;
+  iss.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (mesh.isMesh && mesh.material) {
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const mat of mats) {
+        const m = mat as THREE.MeshStandardMaterial;
+        m.depthTest = false;
+        m.depthWrite = false;
+        if ("emissiveIntensity" in m) m.emissiveIntensity = Math.min(0.45, (m.emissiveIntensity || 0) + 0.12);
+      }
+      mesh.renderOrder = 20;
+    }
+  });
   earthGroup.add(iss);
 
   const issGlowTex = makeGlowSprite();
+  // Amber core + cyan halo so ISS pops against Earth/orbit
   const issGlow = new THREE.Sprite(
     new THREE.SpriteMaterial({
       map: issGlowTex,
       color: 0xfbbf24,
       transparent: true,
-      opacity: 0.55,
+      opacity: 0.7,
+      depthTest: false,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     }),
   );
-  issGlow.scale.setScalar(0.11);
+  issGlow.scale.setScalar(0.18);
+  issGlow.renderOrder = 19;
+  issGlow.frustumCulled = false;
   earthGroup.add(issGlow);
+
+  const issCyanGlow = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: issGlowTex,
+      color: 0x22d3ee,
+      transparent: true,
+      opacity: 0.55,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  issCyanGlow.scale.setScalar(0.28);
+  issCyanGlow.renderOrder = 18;
+  issCyanGlow.frustumCulled = false;
+  earthGroup.add(issCyanGlow);
 
   let satrec: satellite.SatRec | null = null;
   let lastTleKey = "";
@@ -679,6 +752,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     if (p) {
       latLngAltToVec3(p.latitude, p.longitude, p.altitude, iss.position);
       issGlow.position.copy(iss.position);
+      issCyanGlow.position.copy(iss.position);
 
       const ahead = propagate(new Date(now.getTime() + 20_000));
       if (ahead) {
@@ -688,7 +762,9 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         iss.rotateX(Math.PI / 2);
       }
 
-      issGlow.scale.setScalar(0.1 + 0.02 * Math.sin(time * 0.004));
+      const issPulse = 0.5 + 0.5 * Math.sin(time * 0.004);
+      issGlow.scale.setScalar(0.16 + 0.04 * issPulse);
+      issCyanGlow.scale.setScalar(0.24 + 0.06 * issPulse);
 
       if (time - lastIssEmit > 1000) {
         lastIssEmit = time;
@@ -701,12 +777,14 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       }
       iss.visible = true;
       issGlow.visible = true;
+      issCyanGlow.visible = true;
     } else {
       // Keep ISS visible at last position if orbit already built (transient prop miss);
       // only hide when we never had a TLE orbit.
       if (!orbitReady) {
         iss.visible = false;
         issGlow.visible = false;
+        issCyanGlow.visible = false;
       }
       if (time - lastIssEmit > 2000) {
         lastIssEmit = time;
