@@ -28,8 +28,8 @@ type GlobeThreeOptions = {
 };
 
 const EARTH_RADIUS_KM = 6371;
-/** Dense samples so LineLoop has no visible chords */
-const ORBIT_SAMPLES = 360;
+/** Dense samples for closed inertial orbit ellipse (same GMST → true closed ring) */
+const ORBIT_SAMPLES = 256;
 const TEX = "https://cdn.jsdelivr.net/npm/three-globe@2.31.1/example/img";
 const CLOUD_TEX =
   "https://cdn.jsdelivr.net/gh/turban/webgl-earth@master/images/fair_clouds_4k.png";
@@ -133,12 +133,12 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   scene.add(root);
 
   // --- Lighting: soft night ambient + strong sun (Google Earth–like day) ---
-  const ambient = new THREE.AmbientLight(0x6b7c99, 0.34);
+  const ambient = new THREE.AmbientLight(0x8aa0c0, 0.42);
   scene.add(ambient);
   const hemi = new THREE.HemisphereLight(0xb8d4ff, 0x0b1224, 0.22);
   scene.add(hemi);
 
-  const sun = new THREE.DirectionalLight(0xfff6e8, 1.45);
+  const sun = new THREE.DirectionalLight(0xfff6e8, 2.0);
   sun.position.set(5, 0, 0);
   scene.add(sun);
   scene.add(sun.target);
@@ -166,10 +166,10 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const dayNightUniforms = {
     uNightMap: { value: null as THREE.Texture | null },
     uSunDir: { value: sunDir.clone() },
-    uDayBoost: { value: 0.98 }, // ~50% punch vs earlier over-bright day
-    uNightFloor: { value: 0.16 },
+    uDayBoost: { value: 1.15 },
+    uNightFloor: { value: 0.22 },
     uCityBoost: { value: 1.35 },
-    uTermSoft: { value: 0.22 },
+    uTermSoft: { value: 0.28 },
   };
 
   earthMat.onBeforeCompile = (shader) => {
@@ -542,54 +542,74 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     return { latitude, longitude, altitude, velocity };
   }
 
+  function eciToGlobe(pos: satellite.EciVec3<number>, gmst: number, radiusScale: number, target: THREE.Vector3) {
+    // Freeze Earth rotation (same gmst for all samples) → closed orbital ellipse, no ground-track chord
+    const ecf = satellite.eciToEcf(pos, gmst);
+    const len = Math.sqrt(ecf.x * ecf.x + ecf.y * ecf.y + ecf.z * ecf.z) || 1;
+    const s = radiusScale / len;
+    // ECEF → our axes (x=lon0, y=north, z=-lon90)
+    return target.set(ecf.x * s, ecf.z * s, -ecf.y * s);
+  }
+
   function rebuildOrbit(now: Date) {
     const rec = ensureSatrec();
     if (!rec) return;
     const periodMs = orbitPeriodMs(rec);
-    let prevLon: number | null = null;
+    const gmst0 = satellite.gstime(now);
+    let firstSet = false;
+    let fx = 0, fy = 0, fz = 0, gx = 0, gy = 0, gz = 0;
     for (let i = 0; i < ORBIT_SAMPLES; i++) {
-      // i/N spans exactly one mean period; LineLoop closes first↔last (no chord gap)
       const t = new Date(now.getTime() + (i / ORBIT_SAMPLES) * periodMs);
-      const p = propagate(t);
-      if (!p) {
-        // carry forward last good sample
-        if (i > 0) {
-          orbitPositions[i * 3] = orbitPositions[(i - 1) * 3]!;
-          orbitPositions[i * 3 + 1] = orbitPositions[(i - 1) * 3 + 1]!;
-          orbitPositions[i * 3 + 2] = orbitPositions[(i - 1) * 3 + 2]!;
-          orbitGlowPositions[i * 3] = orbitGlowPositions[(i - 1) * 3]!;
-          orbitGlowPositions[i * 3 + 1] = orbitGlowPositions[(i - 1) * 3 + 1]!;
-          orbitGlowPositions[i * 3 + 2] = orbitGlowPositions[(i - 1) * 3 + 2]!;
+      const pv = satellite.propagate(rec, t);
+      if (!pv || !pv.position || typeof pv.position === "boolean") {
+        if (firstSet) {
+          orbitPositions[i * 3] = fx;
+          orbitPositions[i * 3 + 1] = fy;
+          orbitPositions[i * 3 + 2] = fz;
+          orbitGlowPositions[i * 3] = gx;
+          orbitGlowPositions[i * 3 + 1] = gy;
+          orbitGlowPositions[i * 3 + 2] = gz;
         }
         continue;
       }
-      // Unwrap longitude jumps for smoother ECEF path (propagate already continuous in ECI)
-      let lon = p.longitude;
-      if (prevLon != null) {
-        while (lon - prevLon > 180) lon -= 360;
-        while (lon - prevLon < -180) lon += 360;
-      }
-      prevLon = lon;
-      latLngAltToVec3(p.latitude, lon, p.altitude, tmp);
+      const pos = pv.position as satellite.EciVec3<number>;
+      // Mean radius ~ Earth + ~420km in satrec units (km)
+      const rKm = Math.sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z);
+      const altFrac = Math.max(0.02, (rKm - EARTH_RADIUS_KM) / EARTH_RADIUS_KM);
+      eciToGlobe(pos, gmst0, 1 + altFrac, tmp);
       orbitPositions[i * 3] = tmp.x;
       orbitPositions[i * 3 + 1] = tmp.y;
       orbitPositions[i * 3 + 2] = tmp.z;
-      latLngAltToVec3(p.latitude, lon, p.altitude + 35, tmp2);
+      eciToGlobe(pos, gmst0, 1 + altFrac + 0.012, tmp2);
       orbitGlowPositions[i * 3] = tmp2.x;
       orbitGlowPositions[i * 3 + 1] = tmp2.y;
       orbitGlowPositions[i * 3 + 2] = tmp2.z;
+      if (!firstSet) {
+        firstSet = true;
+        fx = tmp.x; fy = tmp.y; fz = tmp.z;
+        gx = tmp2.x; gy = tmp2.y; gz = tmp2.z;
+      }
     }
-    // Force exact closure: last sample matches first (removes residual chord)
-    orbitPositions[0] = orbitPositions[0]!;
-    orbitGlowPositions[0] = orbitGlowPositions[0]!;
+    // Exact closure for LineLoop
+    if (firstSet) {
+      orbitPositions[(ORBIT_SAMPLES - 1) * 3] = orbitPositions[0]!;
+      orbitPositions[(ORBIT_SAMPLES - 1) * 3 + 1] = orbitPositions[1]!;
+      orbitPositions[(ORBIT_SAMPLES - 1) * 3 + 2] = orbitPositions[2]!;
+      orbitGlowPositions[(ORBIT_SAMPLES - 1) * 3] = orbitGlowPositions[0]!;
+      orbitGlowPositions[(ORBIT_SAMPLES - 1) * 3 + 1] = orbitGlowPositions[1]!;
+      orbitGlowPositions[(ORBIT_SAMPLES - 1) * 3 + 2] = orbitGlowPositions[2]!;
+    }
     (orbitGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     (orbitGlowGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     orbitGeo.computeBoundingSphere();
   }
 
-  function updateSun(date: Date) {
-    // ECEF sun in our axes; keep FIXED in world space while Earth (root) rotates.
-    sunDirModel(date, sunDir);
+  function updateSun(_date: Date) {
+    // Bias sun toward the camera so the facing hemisphere is ~half lit (Google Earth–like).
+    // Real UTC sun often puts day on the far side → tiny crescent; user OK moving sun for visibility.
+    const cam = camera.position;
+    // Front-facing key light with a soft offset (not dead-center specular)
+    sunDir.set(cam.x + 0.55, cam.y + 0.35, cam.z + 0.15).normalize();
     dayNightUniforms.uSunDir.value.copy(sunDir);
     sun.position.copy(sunDir).multiplyScalar(6);
     sun.target.position.set(0, 0, 0);
