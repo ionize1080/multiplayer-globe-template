@@ -20,6 +20,8 @@ export type IssSnapshot = {
 type GlobeThreeOptions = {
   canvas: HTMLCanvasElement;
   getRotationSpeed: () => number;
+  /** 0..1 cloud coverage / opacity */
+  getCloudAmount: () => number;
   getMarkers: () => LatLngMarker[];
   getTle: () => [string, string] | null;
   onIssUpdate?: (iss: IssSnapshot | null) => void;
@@ -131,12 +133,12 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   scene.add(root);
 
   // --- Lighting: soft night ambient + strong sun (Google Earth–like day) ---
-  const ambient = new THREE.AmbientLight(0x6b7c99, 0.28);
+  const ambient = new THREE.AmbientLight(0x6b7c99, 0.34);
   scene.add(ambient);
   const hemi = new THREE.HemisphereLight(0xb8d4ff, 0x0b1224, 0.22);
   scene.add(hemi);
 
-  const sun = new THREE.DirectionalLight(0xfff6e8, 2.15);
+  const sun = new THREE.DirectionalLight(0xfff6e8, 1.45);
   sun.position.set(5, 0, 0);
   scene.add(sun);
   scene.add(sun.target);
@@ -164,7 +166,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const dayNightUniforms = {
     uNightMap: { value: null as THREE.Texture | null },
     uSunDir: { value: sunDir.clone() },
-    uDayBoost: { value: 1.12 },
+    uDayBoost: { value: 0.98 }, // ~50% punch vs earlier over-bright day
     uNightFloor: { value: 0.16 },
     uCityBoost: { value: 1.35 },
     uTermSoft: { value: 0.22 },
@@ -277,17 +279,28 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const cloudDrift = 0.0001 + Math.random() * 0.00006;
   const cloudDrift2 = -0.00004 - Math.random() * 0.00003;
 
+  let cloudsReady = false;
   function applyCloudTex(tex: THREE.Texture) {
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 8;
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
     cloudMat.map = tex;
     cloudMat.alphaMap = tex;
-    cloudMat.opacity = 0.78;
     cloudMat.needsUpdate = true;
     cloudShadowMat.alphaMap = tex;
-    cloudShadowMat.opacity = 0.28;
     cloudShadowMat.needsUpdate = true;
+    cloudsReady = true;
+  }
+
+  function applyCloudAmount(amount: number) {
+    const a = Math.min(1, Math.max(0, amount));
+    const on = a > 0.02 && (cloudsReady || !!cloudMat.map);
+    clouds.visible = on;
+    clouds2.visible = on;
+    cloudShadow.visible = on;
+    cloudMat.opacity = 0.15 + a * 0.75; // 0.15..0.90
+    cloudMat2.opacity = 0.05 + a * 0.4; // 0.05..0.45
+    cloudShadowMat.opacity = a * 0.32;
   }
 
   loader.load(
@@ -427,7 +440,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       }
       mesh.visible = true;
       mesh.material = data.self ? markerMatSelf : markerMatOther;
-      mesh.scale.setScalar(Math.max(0.0045, Math.min(0.012, data.size * 0.09)));
+      mesh.scale.setScalar(Math.max(0.006, Math.min(0.018, data.size * 0.14)));
       latLngAltToVec3(data.lat, data.lng, 12, mesh.position);
     }
   }
@@ -660,6 +673,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       }
     }
 
+    applyCloudAmount(opts.getCloudAmount());
     clouds.rotation.y += cloudDrift;
     clouds2.rotation.y += cloudDrift2;
     cloudShadow.rotation.y = clouds.rotation.y;

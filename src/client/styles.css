@@ -442,12 +442,28 @@ a:hover {
 /* .globe-ring removed — atmosphere is three.js Fresnel on earthGroup */
 
 .speed-control {
-  width: min(100%, 360px);
+  width: min(100%, 420px);
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+.controls-row {
+  gap: 0.85rem;
+}
+
+.control-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.control-block label {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
 }
 
 .speed-control b {

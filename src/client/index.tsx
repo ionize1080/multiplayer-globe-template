@@ -270,6 +270,12 @@ function App() {
     rotationSpeedRef.current = rotationSpeed;
   }, [rotationSpeed]);
 
+  const [cloudAmount, setCloudAmount] = useState(0.75);
+  const cloudAmountRef = useRef(cloudAmount);
+  useEffect(() => {
+    cloudAmountRef.current = cloudAmount;
+  }, [cloudAmount]);
+
   const now = useNow(1000);
   const { data, status, error } = useDashboard(45_000);
   const tle = useIssTle();
@@ -293,7 +299,7 @@ function App() {
           id: message.position.id,
           lat: message.position.lat,
           lng: message.position.lng,
-          size: message.position.id === socket.id ? 0.04 : 0.022,
+          size: message.position.id === socket.id ? 0.07 : 0.04,
           self: message.position.id === socket.id,
         });
         socketIdRef.current = socket.id;
@@ -326,6 +332,7 @@ function App() {
     const globe = createGlobeThree({
       canvas,
       getRotationSpeed: () => rotationSpeedRef.current,
+      getCloudAmount: () => cloudAmountRef.current,
       getMarkers: () => [...positions.current.values()],
       getTle: () => tleRef.current,
       onIssUpdate: (iss) => setLiveIss(iss),
@@ -499,19 +506,35 @@ function App() {
             </div>
           </div>
 
-          <div className="speed-control card inline-card">
-            <label htmlFor="speedRange">
-              Rotation <b>{rotationSpeed.toFixed(3)}</b>
-            </label>
-            <input
-              id="speedRange"
-              type="range"
-              min="0"
-              max="0.03"
-              step="0.001"
-              value={rotationSpeed}
-              onChange={(e) => setRotationSpeed(parseFloat(e.target.value))}
-            />
+          <div className="speed-control card inline-card controls-row">
+            <div className="control-block">
+              <label htmlFor="speedRange">
+                Rotation <b>{rotationSpeed.toFixed(3)}</b>
+              </label>
+              <input
+                id="speedRange"
+                type="range"
+                min="0"
+                max="0.03"
+                step="0.001"
+                value={rotationSpeed}
+                onChange={(e) => setRotationSpeed(parseFloat(e.target.value))}
+              />
+            </div>
+            <div className="control-block">
+              <label htmlFor="cloudRange">
+                Clouds <b>{Math.round(cloudAmount * 100)}%</b>
+              </label>
+              <input
+                id="cloudRange"
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value={cloudAmount}
+                onChange={(e) => setCloudAmount(parseFloat(e.target.value))}
+              />
+            </div>
           </div>
         </section>
 
