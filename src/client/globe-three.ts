@@ -45,6 +45,42 @@ type GlobeThreeOptions = {
 
 export type StarlinkTlePair = [string, string];
 
+/** Survives React remounts / StrictMode — Alan fx5 ~10s snap-back */
+export type GlobeViewPose = { theta: number; phi: number };
+const VIEW_POSE_KEY = "ionize-view-pose";
+const VIEW_PHI_DEFAULT = 0.18;
+
+function readStoredViewPose(): GlobeViewPose {
+  try {
+    const raw = sessionStorage.getItem(VIEW_POSE_KEY);
+    if (!raw) return { theta: 0, phi: VIEW_PHI_DEFAULT };
+    const p = JSON.parse(raw) as Partial<GlobeViewPose>;
+    return {
+      theta: Number.isFinite(p.theta) ? (p.theta as number) : 0,
+      phi: Number.isFinite(p.phi)
+        ? Math.min(0.95, Math.max(-0.85, p.phi as number))
+        : VIEW_PHI_DEFAULT,
+    };
+  } catch {
+    return { theta: 0, phi: VIEW_PHI_DEFAULT };
+  }
+}
+
+let memViewPose: GlobeViewPose = readStoredViewPose();
+
+export function getMemViewPose(): GlobeViewPose {
+  return { ...memViewPose };
+}
+
+function persistViewPose(theta: number, phi: number) {
+  memViewPose = { theta, phi };
+  try {
+    sessionStorage.setItem(VIEW_POSE_KEY, JSON.stringify(memViewPose));
+  } catch {
+    /* private mode */
+  }
+}
+
 const EARTH_RADIUS_KM = 6371;
 /** Dense samples for closed inertial orbit ellipse (same GMST → true closed ring) */
 const ORBIT_SAMPLES = 256;
@@ -56,7 +92,7 @@ const CLOUD_TEX_FALLBACK =
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
 export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 /** ISS far-side dim + visitor ripple markers */
-export const GLOBE_FX_BUILD = "fx5-20261028-starlink-sliders-dragfix";
+export const GLOBE_FX_BUILD = "fx6-20261028-view-persist";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -1422,14 +1458,15 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   let dragLastY = 0;
   let dragVelY = 0;
   let dragVelX = 0;
-  // Single source of truth for earth orientation — never reset on mode flicker
-  let viewTheta = 0;
-  let viewPhi = 0.18;
+  // Restore pose from module/session — remount must not snap to default
+  let viewTheta = memViewPose.theta;
+  let viewPhi = memViewPose.phi;
+  let lastPosePersist = 0;
   const DRAG_PHI_MIN = -0.85;
   const DRAG_PHI_MAX = 0.95;
   const DRAG_SENS = 0.0032;
   const DRAG_INERTIA = 0.78;
-  const ROTATE_PHI = 0.18;
+  const ROTATE_PHI = VIEW_PHI_DEFAULT;
 
   function applyInteractionMode(mode: "rotate" | "drag") {
     const prev = interactionMode;
@@ -1667,6 +1704,10 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     root.rotation.y = viewTheta;
     root.rotation.x = viewPhi;
     phi = viewTheta;
+    if (time - lastPosePersist > 250) {
+      lastPosePersist = time;
+      persistViewPose(viewTheta, viewPhi);
+    }
 
     root.updateMatrixWorld(true);
     syncMarkers(opts.getMarkers(), time);
@@ -1681,6 +1722,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   return {
     destroy() {
+      persistViewPose(viewTheta, viewPhi);
       running = false;
       cancelAnimationFrame(raf);
       liveLoadToken += 1;

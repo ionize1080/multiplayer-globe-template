@@ -391,29 +391,37 @@ function App() {
   const positions = useRef<Map<string, LatLngMarker>>(new Map());
   const socketIdRef = useRef<string | null>(null);
 
+  const socketIdLiveRef = useRef<string | null>(null);
+  const onPartyMessage = useRef<(evt: MessageEvent) => void>(() => {});
+  onPartyMessage.current = (evt: MessageEvent) => {
+    const message = JSON.parse(evt.data as string) as OutgoingMessage;
+    if (message.type === "add-marker") {
+      const pos = message.position;
+      if (!pos || !Number.isFinite(pos.lat) || !Number.isFinite(pos.lng)) return;
+      const sid = socketIdLiveRef.current;
+      positions.current.set(pos.id, {
+        id: pos.id,
+        lat: pos.lat,
+        lng: pos.lng,
+        size: pos.id === sid ? 0.12 : 0.08,
+        self: pos.id === sid,
+      });
+      setCounter(positions.current.size);
+    } else if (message.type === "remove-marker") {
+      positions.current.delete(message.id);
+      setCounter(positions.current.size);
+    }
+  };
+
   const socket = usePartySocket({
     room: "default",
     party: "globe",
     onMessage(evt) {
-      const message = JSON.parse(evt.data as string) as OutgoingMessage;
-      if (message.type === "add-marker") {
-        const pos = message.position;
-        if (!pos || !Number.isFinite(pos.lat) || !Number.isFinite(pos.lng)) return;
-        positions.current.set(pos.id, {
-          id: pos.id,
-          lat: pos.lat,
-          lng: pos.lng,
-          size: pos.id === socket.id ? 0.12 : 0.08,
-          self: pos.id === socket.id,
-        });
-        socketIdRef.current = socket.id;
-        setCounter(positions.current.size);
-      } else if (message.type === "remove-marker") {
-        positions.current.delete(message.id);
-        setCounter(positions.current.size);
-      }
+      onPartyMessage.current(evt as MessageEvent);
     },
   });
+  socketIdLiveRef.current = socket.id;
+  socketIdRef.current = socket.id;
 
   useEffect(() => {
     const canvas = canvasRef.current as HTMLCanvasElement | undefined;
@@ -429,9 +437,12 @@ function App() {
     return () => canvas.removeEventListener("wheel", handleWheel);
   }, []);
 
+  // Keep WebGL alive across React re-renders / StrictMode / dashboard polls.
+  // Destroying here caused Alan fx5 ~10s delayed snap-back to default pose.
   useEffect(() => {
     const canvas = canvasRef.current as HTMLCanvasElement | undefined;
     if (!canvas) return;
+    if (globeApiRef.current) return; // already running — do not recreate
 
     const globe = createGlobeThree({
       canvas,
@@ -439,7 +450,19 @@ function App() {
       getCloudAmount: () => cloudAmountRef.current,
       getMarkers: () => [...positions.current.values()],
       getTle: () => tleRef.current,
-      onIssUpdate: (iss) => setLiveIss(iss),
+      onIssUpdate: (iss) => {
+        setLiveIss((prev) => {
+          if (
+            prev &&
+            iss &&
+            Math.abs(prev.latitude - iss.latitude) < 1e-4 &&
+            Math.abs(prev.longitude - iss.longitude) < 1e-4
+          ) {
+            return prev;
+          }
+          return iss;
+        });
+      },
       getShowIss: () => showIssRef.current,
       getShowStarlink: () => showStarlinkRef.current,
       getStarlinkDensity: () => starlinkDensityRef.current,
@@ -447,11 +470,18 @@ function App() {
       getInteractionMode: () => interactionModeRef.current,
     });
     globeApiRef.current = globe;
+    // no cleanup destroy — pagehide below
+  }, []);
 
-    return () => {
+  useEffect(() => {
+    const onHide = () => {
+      const g = globeApiRef.current;
+      if (!g) return;
       globeApiRef.current = null;
-      globe.destroy();
+      g.destroy();
     };
+    window.addEventListener("pagehide", onHide);
+    return () => window.removeEventListener("pagehide", onHide);
   }, []);
 
   // Near-realtime clouds: fetch NASA mosaic via Worker proxy; refresh ~2h
