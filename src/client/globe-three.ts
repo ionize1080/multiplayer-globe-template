@@ -42,7 +42,7 @@ const CLOUD_TEX =
 const CLOUD_TEX_FALLBACK =
   "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_clouds_1024.png";
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
-export const LIVE_CLOUDS_BUILD = "c7-20261028-white-seams";
+export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -574,11 +574,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
           const wa = wispAlphaAt(i);
           if (isNodata[p] || gapCol[x]) {
-            // Mix wisp + bleed inside barcode; keep white RGB
-            const fill = Math.max(wa * 0.7, bleed * 0.55);
-            const out = Math.max(live, Math.round(fill));
+            // Wisp-dominated fill (not flat gray floor); light bleed only
+            const fill = Math.round(wa * 0.82 + bleed * 0.22);
+            const out = Math.max(live, fill);
             d[i] = d[i + 1] = d[i + 2] = 255;
-            d[i + 3] = Math.max(55, Math.min(200, out));
+            d[i + 3] = Math.min(190, out);
             continue;
           }
 
@@ -590,6 +590,28 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         }
       }
       await yieldFrame();
+    }
+
+    // Soften barcode fill edges only (3px horiz, gap columns) — not ocean smear
+    {
+      const tmp = new Uint8Array(w * h);
+      for (let p = 0; p < tmp.length; p++) tmp[p] = d[(p << 2) + 3]!;
+      for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+          if (gapW[x]! < 0.2) continue;
+          let sum = 0;
+          let n = 0;
+          for (let k = Math.max(0, x - 3); k <= Math.min(w - 1, x + 3); k++) {
+            sum += tmp[row + k]!;
+            n++;
+          }
+          const i = (row + x) << 2;
+          const blended = sum / n;
+          const m = Math.min(1, gapW[x]!);
+          d[i + 3] = Math.round(tmp[row + x]! * (1 - m * 0.65) + blended * (m * 0.65));
+        }
+      }
     }
 
     ctx.putImageData(id, 0, 0);
