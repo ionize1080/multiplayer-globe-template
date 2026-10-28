@@ -604,28 +604,47 @@ function parseStarlinkTleText(text: string): StarlinkTlePair[] {
 }
 
 async function fetchStarlinkCatalog(): Promise<StarlinkPayload> {
-  const catalogUrl =
-    "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle";
-  const res = await fetch(catalogUrl, {
-    headers: {
-      Accept: "text/plain,*/*",
-      "User-Agent": "ionize.club-globe/1.0 (educational; contact via ionize.club)",
-    },
-  });
-  if (!res.ok) throw new Error(`Celestrak Starlink → ${res.status}`);
-  const text = await res.text();
-  if (!text || text.length < 100) throw new Error("Celestrak Starlink empty body");
-  const tles = parseStarlinkTleText(text);
-  if (tles.length < 100) throw new Error(`Starlink parse too small: ${tles.length}`);
-  return {
-    ok: true,
-    count: tles.length,
-    source: "Celestrak GP · GROUP=starlink",
-    fetchedAt: new Date().toISOString(),
-    catalogUrl,
-    tles,
-    note: "Active Starlink TLEs from Celestrak; positions via client SGP4",
+  const urls = [
+    "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle",
+    "https://www.celestrak.com/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle",
+  ];
+  const headers = {
+    Accept: "text/plain,*/*",
+    "User-Agent": "ionize.club-globe/1.0 (educational; contact via ionize.club)",
   };
+  let lastErr: unknown;
+  for (const catalogUrl of urls) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const res = await fetch(catalogUrl, { headers });
+        if (!res.ok) throw new Error(`Celestrak Starlink → ${res.status}`);
+        const text = await res.text();
+        if (!text || text.length < 100) throw new Error("Celestrak Starlink empty body");
+        const tles = parseStarlinkTleText(text);
+        if (tles.length < 100) throw new Error(`Starlink parse too small: ${tles.length}`);
+        return {
+          ok: true,
+          count: tles.length,
+          source: "Celestrak GP · GROUP=starlink",
+          fetchedAt: new Date().toISOString(),
+          catalogUrl,
+          tles,
+          note: "Active Starlink TLEs from Celestrak; positions via client SGP4",
+        };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+  }
+  // Serve last good cache if upstream flaps (522 etc.)
+  if (starlinkCache?.data) {
+    return {
+      ...starlinkCache.data,
+      fetchedAt: starlinkCache.data.fetchedAt,
+      note: `${starlinkCache.data.note} (stale cache; upstream: ${String(lastErr)})`,
+    };
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 async function getStarlinkCatalog(): Promise<StarlinkPayload> {
