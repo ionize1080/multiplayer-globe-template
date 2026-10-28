@@ -17,6 +17,8 @@ type MarketQuote = {
   changePct: number | null;
   currency: string;
   sparkline: number[];
+  kind: "spot" | "futures";
+  session: "rth" | "futures";
 };
 
 type IssData = {
@@ -132,12 +134,57 @@ async function getIssTle(): Promise<IssTlePayload> {
   }
 }
 
-const MARKET_DEFS = [
-  { symbol: "S&P 500", yahoo: "^GSPC", name: "S&P 500" },
-  { symbol: "NASDAQ", yahoo: "^IXIC", name: "NASDAQ" },
+type MarketDef = {
+  symbol: string;
+  yahoo: string;
+  name: string;
+  /** When set, used outside US regular trading hours instead of yahoo */
+  futuresYahoo?: string;
+  futuresSymbol?: string;
+  futuresName?: string;
+};
+
+const MARKET_DEFS: MarketDef[] = [
+  {
+    symbol: "S&P 500",
+    yahoo: "^GSPC",
+    name: "S&P 500",
+    futuresYahoo: "ES=F",
+    futuresSymbol: "ES",
+    futuresName: "E-mini S&P 500",
+  },
+  {
+    symbol: "NASDAQ",
+    yahoo: "^IXIC",
+    name: "NASDAQ",
+    futuresYahoo: "NQ=F",
+    futuresSymbol: "NQ",
+    futuresName: "E-mini Nasdaq-100",
+  },
   { symbol: "HSI", yahoo: "^HSI", name: "Hang Seng" },
   { symbol: "SSE", yahoo: "000001.SS", name: "Shanghai Comp." },
-] as const;
+];
+
+/** US equity RTH: Mon–Fri 09:30–16:00 America/New_York (no holiday calendar). */
+function isUsEquityRth(date = new Date()): boolean {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = Object.fromEntries(
+    fmt.formatToParts(date).filter((p) => p.type !== "literal").map((p) => [p.type, p.value]),
+  ) as { weekday?: string; hour?: string; minute?: string };
+  const wd = parts.weekday || "";
+  if (wd === "Sat" || wd === "Sun") return false;
+  const hour = parseInt(parts.hour || "0", 10);
+  const minute = parseInt(parts.minute || "0", 10);
+  const mins = hour * 60 + minute;
+  // 09:30–16:00 ET inclusive of open, exclusive of close
+  return mins >= 9 * 60 + 30 && mins < 16 * 60;
+}
 
 const WEATHER_CODES: Record<number, string> = {
   0: "Clear",
@@ -194,12 +241,19 @@ async function fetchIss(): Promise<IssData> {
   };
 }
 
-async function fetchMarket(def: (typeof MARKET_DEFS)[number]): Promise<MarketQuote> {
+async function fetchYahooChart(yahoo: string): Promise<{
+  price: number | null;
+  previousClose: number | null;
+  change: number | null;
+  changePct: number | null;
+  currency: string;
+  sparkline: number[];
+}> {
   // range=1mo feeds the sparkline only. Yahoo's meta.chartPreviousClose on a
   // multi-week range is the *first* bar of that range (not prior session), so
   // day change MUST come from the daily series / regularMarketChangePercent.
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-    def.yahoo,
+    yahoo,
   )}?interval=1d&range=1mo`;
   const data = await fetchJson<{
     chart: {
@@ -219,7 +273,7 @@ async function fetchMarket(def: (typeof MARKET_DEFS)[number]): Promise<MarketQuo
 
   const result = data.chart.result?.[0];
   if (!result) {
-    throw new Error(`No chart for ${def.yahoo}`);
+    throw new Error(`No chart for ${yahoo}`);
   }
 
   const closes = (result.indicators.quote[0]?.close || []).filter(
@@ -238,19 +292,27 @@ async function fetchMarket(def: (typeof MARKET_DEFS)[number]): Promise<MarketQuo
         ? (change / previousClose) * 100
         : null;
 
-  // Keep last ~24 points for a clean sparkline
-  const sparkline = closes.slice(-24);
-
   return {
-    symbol: def.symbol,
-    yahoo: def.yahoo,
-    name: def.name,
     price,
     previousClose,
     change,
     changePct,
     currency: result.meta.currency || "USD",
-    sparkline,
+    sparkline: closes.slice(-24),
+  };
+}
+
+async function fetchMarket(def: MarketDef, preferFutures: boolean): Promise<MarketQuote> {
+  const useFutures = Boolean(preferFutures && def.futuresYahoo);
+  const yahoo = useFutures ? def.futuresYahoo! : def.yahoo;
+  const chart = await fetchYahooChart(yahoo);
+  return {
+    symbol: useFutures ? def.futuresSymbol || def.symbol : def.symbol,
+    yahoo,
+    name: useFutures ? def.futuresName || def.name : def.name,
+    ...chart,
+    kind: useFutures ? "futures" : "spot",
+    session: useFutures ? "futures" : "rth",
   };
 }
 
@@ -278,6 +340,8 @@ async function fetchSingaporeWeather(): Promise<WeatherData> {
 
 async function buildDashboard(): Promise<DashboardPayload> {
   const errors: string[] = [];
+  const usRth = isUsEquityRth();
+  const preferFutures = !usRth;
   const [issSettled, weatherSettled, ...marketSettled] = await Promise.all([
     fetchIss().then(
       (v) => ({ ok: true as const, v }),
@@ -288,9 +352,16 @@ async function buildDashboard(): Promise<DashboardPayload> {
       (e) => ({ ok: false as const, e }),
     ),
     ...MARKET_DEFS.map((def) =>
-      fetchMarket(def).then(
+      fetchMarket(def, preferFutures).then(
         (v) => ({ ok: true as const, v }),
-        (e) => ({ ok: false as const, e, def }),
+        (e) =>
+          // Futures fallback → spot if ES/NQ chart fails
+          preferFutures && def.futuresYahoo
+            ? fetchMarket(def, false).then(
+                (v) => ({ ok: true as const, v }),
+                (e2) => ({ ok: false as const, e: e2, def }),
+              )
+            : Promise.resolve({ ok: false as const, e, def }),
       ),
     ),
   ]);
