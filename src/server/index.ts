@@ -45,6 +45,92 @@ type DashboardPayload = {
 };
 
 const CACHE_TTL_MS = 45_000;
+const TLE_CACHE_TTL_MS = 60 * 60 * 1000;
+
+type IssTlePayload = {
+  name: string;
+  line1: string;
+  line2: string;
+  fetchedAt: string;
+  source: string;
+};
+
+let tleCache: { at: number; data: IssTlePayload } | null = null;
+let tleInflight: Promise<IssTlePayload> | null = null;
+
+async function fetchIssTle(): Promise<IssTlePayload> {
+  const errors: string[] = [];
+
+  // 1) WhereTheISS JSON TLE (most reliable from Workers)
+  try {
+    const data = await fetchJson<{
+      name?: string;
+      header?: string;
+      line1: string;
+      line2: string;
+    }>("https://api.wheretheiss.at/v1/satellites/25544/tles");
+    if (data.line1 && data.line2) {
+      return {
+        name: data.header || data.name || "ISS (ZARYA)",
+        line1: data.line1.trim(),
+        line2: data.line2.trim(),
+        fetchedAt: new Date().toISOString(),
+        source: "wheretheiss",
+      };
+    }
+    errors.push("wheretheiss: missing lines");
+  } catch (e) {
+    errors.push(`wheretheiss: ${String(e)}`);
+  }
+
+  // 2) Celestrak GP
+  try {
+    const url = "https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=tle";
+    const res = await fetch(url, {
+      headers: {
+        Accept: "text/plain",
+        "User-Agent": "ionize.club-dashboard/1.0",
+      },
+    });
+    if (!res.ok) throw new Error(`tle → ${res.status}`);
+    const text = (await res.text()).trim();
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length < 3) throw new Error("tle parse failed");
+    // Celestrak may return name + 2 lines, or just 2 lines
+    const hasName = !lines[0]!.startsWith("1 ");
+    return {
+      name: hasName ? lines[0]! : "ISS (ZARYA)",
+      line1: hasName ? lines[1]! : lines[0]!,
+      line2: hasName ? lines[2]! : lines[1]!,
+      fetchedAt: new Date().toISOString(),
+      source: "celestrak",
+    };
+  } catch (e) {
+    errors.push(`celestrak: ${String(e)}`);
+  }
+
+  throw new Error(`tle failed: ${errors.join("; ")}`);
+}
+
+async function getIssTle(): Promise<IssTlePayload> {
+  const now = Date.now();
+  if (tleCache && now - tleCache.at < TLE_CACHE_TTL_MS) return tleCache.data;
+  if (tleInflight) return tleInflight;
+  tleInflight = fetchIssTle()
+    .then((data) => {
+      tleCache = { at: Date.now(), data };
+      return data;
+    })
+    .finally(() => {
+      tleInflight = null;
+    });
+  try {
+    return await tleInflight;
+  } catch (e) {
+    if (tleCache) return tleCache.data;
+    throw e;
+  }
+}
 
 const MARKET_DEFS = [
   { symbol: "S&P 500", yahoo: "^GSPC", name: "S&P 500" },
@@ -98,16 +184,20 @@ async function fetchIss(): Promise<IssData> {
     velocity: number;
     visibility: string;
   }>("https://api.wheretheiss.at/v1/satellites/25544");
+  // WhereTheISS velocity is km/h (~27575) → store as km/s for the panel
   return {
     latitude: data.latitude,
     longitude: data.longitude,
     altitude: data.altitude,
-    velocity: data.velocity,
+    velocity: data.velocity / 3600,
     visibility: data.visibility,
   };
 }
 
 async function fetchMarket(def: (typeof MARKET_DEFS)[number]): Promise<MarketQuote> {
+  // range=1mo feeds the sparkline only. Yahoo's meta.chartPreviousClose on a
+  // multi-week range is the *first* bar of that range (not prior session), so
+  // day change MUST come from the daily series / regularMarketChangePercent.
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
     def.yahoo,
   )}?interval=1d&range=1mo`;
@@ -118,6 +208,7 @@ async function fetchMarket(def: (typeof MARKET_DEFS)[number]): Promise<MarketQuo
           regularMarketPrice?: number;
           chartPreviousClose?: number;
           previousClose?: number;
+          regularMarketChangePercent?: number;
           currency?: string;
         };
         indicators: { quote: Array<{ close: Array<number | null> }> };
@@ -135,14 +226,17 @@ async function fetchMarket(def: (typeof MARKET_DEFS)[number]): Promise<MarketQuo
     (v): v is number => typeof v === "number" && Number.isFinite(v),
   );
   const price = result.meta.regularMarketPrice ?? closes.at(-1) ?? null;
-  const previousClose =
-    result.meta.chartPreviousClose ??
-    result.meta.previousClose ??
-    (closes.length > 1 ? closes[closes.length - 2] : null);
+  // Prior trading session close = second-to-last daily close (NOT chartPreviousClose).
+  const previousClose = closes.length > 1 ? closes[closes.length - 2] : null;
   const change =
     price != null && previousClose != null ? price - previousClose : null;
   const changePct =
-    change != null && previousClose ? (change / previousClose) * 100 : null;
+    typeof result.meta.regularMarketChangePercent === "number" &&
+    Number.isFinite(result.meta.regularMarketChangePercent)
+      ? result.meta.regularMarketChangePercent
+      : change != null && previousClose
+        ? (change / previousClose) * 100
+        : null;
 
   // Keep last ~24 points for a clean sparkline
   const sparkline = closes.slice(-24);
@@ -269,10 +363,13 @@ export class Globe extends Server {
 
     for (const connection of this.getConnections<ConnectionState>()) {
       try {
+        const existing = connection.state?.position;
+        // Skip ghost sockets that never got a CF lat/lng (no marker state)
+        if (!existing) continue;
         conn.send(
           JSON.stringify({
             type: "add-marker",
-            position: connection.state!.position,
+            position: existing,
           } satisfies OutgoingMessage),
         );
 
@@ -320,6 +417,23 @@ export default {
         latitude: cf?.latitude ?? "",
         longitude: cf?.longitude ?? "",
       });
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/iss-tle") {
+      try {
+        const data = await getIssTle();
+        return Response.json(data, {
+          headers: {
+            "Cache-Control": "public, max-age=300",
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      } catch (e) {
+        return Response.json(
+          { error: String(e) },
+          { status: 502, headers: { "Access-Control-Allow-Origin": "*" } },
+        );
+      }
     }
 
     if (request.method === "GET" && url.pathname === "/api/dashboard") {
