@@ -12,7 +12,7 @@
     "directory": "public"
   },
   "build": {
-    "command": "npx esbuild src/client/index.tsx --bundle --outdir=public/dist --splitting --sourcemap --format=esm"
+    "command": "npx esbuild src/client/index.tsx --bundle --outdir=public/dist --format=esm --minify --target=es2022"
   },
   "durable_objects": {
     "bindings": [

@@ -45,6 +45,59 @@ type DashboardPayload = {
 };
 
 const CACHE_TTL_MS = 45_000;
+const TLE_CACHE_TTL_MS = 60 * 60 * 1000;
+
+type IssTlePayload = {
+  name: string;
+  line1: string;
+  line2: string;
+  fetchedAt: string;
+  source: string;
+};
+
+let tleCache: { at: number; data: IssTlePayload } | null = null;
+let tleInflight: Promise<IssTlePayload> | null = null;
+
+async function fetchIssTle(): Promise<IssTlePayload> {
+  const url = "https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=tle";
+  const res = await fetch(url, {
+    headers: {
+      Accept: "text/plain",
+      "User-Agent": "ionize.club-dashboard/1.0",
+    },
+  });
+  if (!res.ok) throw new Error(`tle → ${res.status}`);
+  const text = (await res.text()).trim();
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 3) throw new Error("tle parse failed");
+  return {
+    name: lines[0],
+    line1: lines[1],
+    line2: lines[2],
+    fetchedAt: new Date().toISOString(),
+    source: "celestrak",
+  };
+}
+
+async function getIssTle(): Promise<IssTlePayload> {
+  const now = Date.now();
+  if (tleCache && now - tleCache.at < TLE_CACHE_TTL_MS) return tleCache.data;
+  if (tleInflight) return tleInflight;
+  tleInflight = fetchIssTle()
+    .then((data) => {
+      tleCache = { at: Date.now(), data };
+      return data;
+    })
+    .finally(() => {
+      tleInflight = null;
+    });
+  try {
+    return await tleInflight;
+  } catch (e) {
+    if (tleCache) return tleCache.data;
+    throw e;
+  }
+}
 
 const MARKET_DEFS = [
   { symbol: "S&P 500", yahoo: "^GSPC", name: "S&P 500" },
@@ -320,6 +373,23 @@ export default {
         latitude: cf?.latitude ?? "",
         longitude: cf?.longitude ?? "",
       });
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/iss-tle") {
+      try {
+        const data = await getIssTle();
+        return Response.json(data, {
+          headers: {
+            "Cache-Control": "public, max-age=300",
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      } catch (e) {
+        return Response.json(
+          { error: String(e) },
+          { status: 502, headers: { "Access-Control-Allow-Origin": "*" } },
+        );
+      }
     }
 
     if (request.method === "GET" && url.pathname === "/api/dashboard") {
