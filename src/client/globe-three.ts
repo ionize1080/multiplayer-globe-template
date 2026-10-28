@@ -79,8 +79,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   // Lights
   scene.add(new THREE.AmbientLight(0xa5d8ff, 0.78));
-  const key = new THREE.DirectionalLight(0xffffff, 1.6);
-  key.position.set(4, 2, 3);
+  const key = new THREE.DirectionalLight(0xe8f1ff, 1.35);
+  key.position.set(3.2, 2.4, 3.5);
   scene.add(key);
   const rim = new THREE.DirectionalLight(0x7dd3fc, 0.7);
   rim.position.set(-3, -1, -2);
@@ -93,19 +93,54 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   root.add(earthGroup);
 
   const earthGeo = new THREE.SphereGeometry(1, 96, 96);
-  const earthMat = new THREE.MeshStandardMaterial({
+  // Physical material: matte land, soft water sheen (not plastic chrome)
+  const earthMat = new THREE.MeshPhysicalMaterial({
     color: 0x122038,
-    roughness: 0.72,
-    metalness: 0.12,
+    roughness: 1,
+    metalness: 0,
     emissive: 0x0c1a2e,
     emissiveIntensity: 0.55,
+    clearcoat: 0.06,
+    clearcoatRoughness: 0.75,
+    reflectivity: 0.15,
+    specularIntensity: 0.2,
+    specularColor: new THREE.Color(0x8ecaff),
   });
   const earth = new THREE.Mesh(earthGeo, earthMat);
   earthGroup.add(earth);
 
+  /** Water mask (white=ocean) → roughness map: land matte, ocean softly reflective */
+  function waterToSoftRoughnessMap(waterTex: THREE.Texture) {
+    const img = waterTex.image as CanvasImageSource & { width: number; height: number };
+    const c = document.createElement("canvas");
+    c.width = img.width || 1024;
+    c.height = img.height || 512;
+    const ctx = c.getContext("2d")!;
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    const id = ctx.getImageData(0, 0, c.width, c.height);
+    const d = id.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const water = d[i]! / 255; // oceans bright in earth-water.png
+      // land ~1.0 rough; ocean ~0.68 — soft water, not mirror
+      const rough = 1 - water * 0.32;
+      const v = Math.round(rough * 255);
+      d[i] = v;
+      d[i + 1] = v;
+      d[i + 2] = v;
+      d[i + 3] = 255;
+    }
+    ctx.putImageData(id, 0, 0);
+    const map = new THREE.CanvasTexture(c);
+    map.colorSpace = THREE.NoColorSpace;
+    map.anisotropy = 4;
+    map.needsUpdate = true;
+    return map;
+  }
+
   const loader = new THREE.TextureLoader();
+  const TEX = "https://cdn.jsdelivr.net/npm/three-globe@2.31.1/example/img";
   loader.load(
-    "https://cdn.jsdelivr.net/npm/three-globe@2.31.1/example/img/earth-night.jpg",
+    `${TEX}/earth-night.jpg`,
     (tex) => {
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.anisotropy = 8;
@@ -119,6 +154,22 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     undefined,
     () => {
       /* keep solid fallback */
+    },
+  );
+  loader.load(
+    `${TEX}/earth-water.png`,
+    (waterTex) => {
+      earthMat.roughnessMap = waterToSoftRoughnessMap(waterTex);
+      earthMat.roughness = 1;
+      earthMat.metalness = 0;
+      earthMat.clearcoat = 0.08;
+      earthMat.clearcoatRoughness = 0.72;
+      earthMat.needsUpdate = true;
+      waterTex.dispose();
+    },
+    undefined,
+    () => {
+      /* no water mask — keep matte physical defaults */
     },
   );
 
