@@ -52,7 +52,7 @@ const CLOUD_TEX_FALLBACK =
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
 export const LIVE_CLOUDS_BUILD = "c7b-20261028-wisp-fill";
 /** ISS far-side dim + visitor ripple markers */
-export const GLOBE_FX_BUILD = "fx3-20261028-drag-sun-starlink";
+export const GLOBE_FX_BUILD = "fx4-20261028-occlusion-starlink";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -146,9 +146,9 @@ function makeRingTexture(size = 128) {
 }
 
 /**
- * Soft far-side dim vs camera. Earth mesh stays opaque; markers/ISS keep
- * depthTest:false and dim so they read as faintly seen through the globe.
- * Returns ~1 facing camera, ~0.2 when fully behind (limb soft-steps).
+ * Soft limb fade vs camera (for markers). ISS uses real depthTest occlusion;
+ * this helper only softens near the limb / far hemisphere for non-occluded draws.
+ * Returns ~1 facing camera, ~0 when fully behind.
  */
 function farSideBrightness(worldPos: THREE.Vector3, cameraPos: THREE.Vector3) {
   const len = worldPos.length();
@@ -156,8 +156,7 @@ function farSideBrightness(worldPos: THREE.Vector3, cameraPos: THREE.Vector3) {
   const facing =
     (worldPos.x * cameraPos.x + worldPos.y * cameraPos.y + worldPos.z * cameraPos.z) /
     (len * (cameraPos.length() || 1));
-  const face = THREE.MathUtils.smoothstep(facing, -0.18, 0.4);
-  return 0.2 + 0.8 * face;
+  return THREE.MathUtils.smoothstep(facing, -0.05, 0.35);
 }
 
 function waterToSoftRoughnessMap(waterTex: THREE.Texture) {
@@ -303,6 +302,9 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   earthMat.customProgramCacheKey = () => "earth-day-night-r2";
 
   const earth = new THREE.Mesh(earthGeo, earthMat);
+  earthMat.depthWrite = true;
+  earthMat.depthTest = true;
+  earth.renderOrder = 0;
   earthGroup.add(earth);
 
   const loader = new THREE.TextureLoader();
@@ -875,7 +877,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         color: coreColor,
         transparent: true,
         opacity: 0.95,
-        depthTest: false,
+        depthTest: true,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       }),
@@ -889,7 +891,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         color: ringColor,
         transparent: true,
         opacity: 0.55,
-        depthTest: false,
+        depthTest: true,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       }),
@@ -903,7 +905,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         color: ringColor,
         transparent: true,
         opacity: 0.4,
-        depthTest: false,
+        depthTest: true,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       }),
@@ -967,15 +969,15 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       fx.core.scale.setScalar(coreSize);
 
       // Two staggered ripples; max radius kept modest (~0.07) so they don't dominate
-      const tA = ((timeMs * 0.00045 + fx.phase) % 1 + 1) % 1;
-      const tB = ((timeMs * 0.00045 + fx.phase + 0.5) % 1 + 1) % 1;
-      const rMin = coreSize * 1.05;
-      const rMax = Math.min(0.072, coreSize * 3.2);
+      const tA = ((timeMs * 0.0007 + fx.phase) % 1 + 1) % 1;
+      const tB = ((timeMs * 0.0007 + fx.phase + 0.5) % 1 + 1) % 1;
+      const rMin = coreSize * 1.15;
+      const rMax = Math.min(0.095, coreSize * 4.2);
       fx.ringA.scale.setScalar(rMin + (rMax - rMin) * tA);
       fx.ringB.scale.setScalar(rMin + (rMax - rMin) * tB);
-      (fx.core.material as THREE.SpriteMaterial).opacity = (fx.self ? 0.98 : 0.88) * bright;
-      (fx.ringA.material as THREE.SpriteMaterial).opacity = (1 - tA) * 0.55 * bright;
-      (fx.ringB.material as THREE.SpriteMaterial).opacity = (1 - tB) * 0.4 * bright;
+      (fx.core.material as THREE.SpriteMaterial).opacity = (fx.self ? 0.98 : 0.88) * Math.max(0.15, bright);
+      (fx.ringA.material as THREE.SpriteMaterial).opacity = (1 - tA) * (1 - tA) * 0.75 * Math.max(0.12, bright);
+      (fx.ringB.material as THREE.SpriteMaterial).opacity = (1 - tB) * (1 - tB) * 0.55 * Math.max(0.12, bright);
     }
   }
 
@@ -1021,7 +1023,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       for (const mat of mats) {
         const m = mat as THREE.MeshStandardMaterial;
-        m.depthTest = false;
+        m.depthTest = true; // real Earth occlusion (Aura R1 P0)
         m.depthWrite = false;
         m.transparent = true;
         if ("emissiveIntensity" in m) {
@@ -1043,7 +1045,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       color: 0xfbbf24,
       transparent: true,
       opacity: 0.7,
-      depthTest: false,
+      depthTest: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     }),
@@ -1059,7 +1061,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       color: 0x22d3ee,
       transparent: true,
       opacity: 0.55,
-      depthTest: false,
+      depthTest: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     }),
@@ -1075,9 +1077,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   (issCyanGlow.material as THREE.SpriteMaterial).opacity = ISS_CYAN_OPACITY;
 
   // --- Starlink constellation as Points (chunked SGP4, no heavy meshes) ---
-  const STARLINK_CHUNK = 280;
-  const STARLINK_REFRESH_MS = 12_000;
+  const STARLINK_CHUNK = 320;
+  const STARLINK_REFRESH_MS = 15_000;
   const STARLINK_ALT_FALLBACK_KM = 550;
+  /** Cap drawn sats (server also thins); keeps limb halo under control */
+  const STARLINK_DRAW_MAX = 2200;
   let starlinkSatrecs: satellite.SatRec[] = [];
   let starlinkPropCursor = 0;
   let starlinkPropActive = false;
@@ -1089,9 +1093,9 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   starlinkGeo.setAttribute("position", starlinkPosAttr);
   const starlinkMat = new THREE.PointsMaterial({
     color: 0xa5b4fc,
-    size: 0.011,
+    size: 0.0055,
     transparent: true,
-    opacity: 0.78,
+    opacity: 0.42,
     depthTest: true,
     depthWrite: false,
     sizeAttenuation: true,
@@ -1110,19 +1114,22 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       starlinkGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(3), 3));
       return;
     }
+    // Evenly thin to DRAW_MAX so limb isn't a white shell
+    const step = Math.max(1, Math.ceil(tles.length / STARLINK_DRAW_MAX));
     const recs: satellite.SatRec[] = [];
-    for (const pair of tles) {
+    for (let i = 0; i < tles.length; i += step) {
+      const pair = tles[i]!;
       try {
         const rec = satellite.twoline2satrec(pair[0], pair[1]);
         if (rec) recs.push(rec);
       } catch {
         /* skip bad TLE */
       }
+      if (recs.length >= STARLINK_DRAW_MAX) break;
     }
     starlinkSatrecs = recs;
     starlinkCount = recs.length;
     const buf = new Float32Array(Math.max(1, recs.length) * 3);
-    // Park unused at origin until first prop
     starlinkPosAttr = new THREE.BufferAttribute(buf, 3);
     starlinkPosAttr.setUsage(THREE.DynamicDrawUsage);
     starlinkGeo.setAttribute("position", starlinkPosAttr);
@@ -1289,19 +1296,19 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     orbitReady = firstSet;
   }
 
-  // World-fixed sun: set once toward the default camera-facing hemisphere (~half lit).
-  // Does NOT track the camera each frame — Earth rotates under a stable light (Jack: 太阳位置固定).
-  const FIXED_SUN = new THREE.Vector3(0.55, 0.4, 1.0).normalize();
-  sunDir.copy(FIXED_SUN);
-  dayNightUniforms.uSunDir.value.copy(FIXED_SUN);
-  sun.position.copy(FIXED_SUN).multiplyScalar(6);
+  // Astronomical sun in world/ECEF-mapped globe axes; Earth (root) spins under it.
+  // Marker tracks the same vector so lit hemisphere stays aligned (Aura R1 P1).
+  const liveSun = new THREE.Vector3(0.55, 0.4, 1.0).normalize();
+  sunDir.copy(liveSun);
+  dayNightUniforms.uSunDir.value.copy(liveSun);
+  sun.position.copy(liveSun).multiplyScalar(6);
   sun.target.position.set(0, 0, 0);
 
-  function updateSun(_date: Date) {
-    // Keep sun fixed in world space while Earth (root) spins.
-    sunDir.copy(FIXED_SUN);
-    dayNightUniforms.uSunDir.value.copy(FIXED_SUN);
-    sun.position.copy(FIXED_SUN).multiplyScalar(6);
+  function updateSun(date: Date) {
+    sunDirModel(date, liveSun);
+    sunDir.copy(liveSun);
+    dayNightUniforms.uSunDir.value.copy(liveSun);
+    sun.position.copy(liveSun).multiplyScalar(6);
     sun.target.updateMatrixWorld();
   }
 
@@ -1390,8 +1397,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   let dragPhi = 0.18; // tilt around X (matches prior root.rotation.x)
   const DRAG_PHI_MIN = -0.85;
   const DRAG_PHI_MAX = 0.95;
-  const DRAG_SENS = 0.0055;
-  const DRAG_INERTIA = 0.92;
+  const DRAG_SENS = 0.0032;
+  const DRAG_INERTIA = 0.78;
 
   function applyInteractionMode(mode: "rotate" | "drag") {
     interactionMode = mode;
@@ -1525,8 +1532,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const now = new Date();
     updateSun(now);
     // Sun glyph sits just outside Earth limb along fixed sun direction
-    sunSprite.position.copy(FIXED_SUN).multiplyScalar(1.28);
-    sunBeam.position.copy(FIXED_SUN).multiplyScalar(1.22);
+    sunSprite.position.copy(liveSun).multiplyScalar(1.28);
+    sunBeam.position.copy(liveSun).multiplyScalar(1.22);
     const sunPulse = 0.5 + 0.5 * Math.sin(time * 0.002);
     sunSprite.scale.setScalar(0.2 + 0.04 * sunPulse);
     sunBeam.scale.setScalar(0.38 + 0.06 * sunPulse);
@@ -1553,11 +1560,15 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         orientIss(iss.position, tmp);
       }
 
-      // Far-side dim (Earth stays opaque; ISS faintly "through" globe)
+      // Real depth occlusion (depthTest) + soft limb fade; hide when fully behind
       root.updateMatrixWorld(true);
       iss.getWorldPosition(tmp2);
       const issBright = farSideBrightness(tmp2, camera.position);
-      applyIssDim(issBright);
+      applyIssDim(Math.max(0.35, issBright));
+      const occluded = issBright < 0.02;
+      iss.visible = !occluded;
+      issGlow.visible = !occluded && issBright > 0.08;
+      issCyanGlow.visible = !occluded && issBright > 0.08;
 
       const issPulse = 0.5 + 0.5 * Math.sin(time * 0.004);
       issGlow.scale.setScalar((0.16 + 0.04 * issPulse) * (0.55 + 0.45 * issBright));
@@ -1572,9 +1583,6 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
           velocity: p.velocity,
         });
       }
-      iss.visible = true;
-      issGlow.visible = true;
-      issCyanGlow.visible = true;
       orbitLine.visible = orbitReady;
       orbitGlow.visible = orbitReady;
     } else {

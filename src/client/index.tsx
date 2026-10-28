@@ -492,51 +492,86 @@ function App() {
     };
   }, [cloudMode]);
 
-  // Starlink catalog via Worker proxy — load when layer enabled (or stats refresh)
+  // Starlink catalog via Worker proxy — load when layer enabled (retry + always clear loading)
   useEffect(() => {
-    const globe = globeApiRef.current;
     if (!showStarlink) {
-      globe?.setStarlinkTles(null);
+      globeApiRef.current?.setStarlinkTles(null);
+      setStarlinkLoading(false);
+      setStarlinkError(null);
       return;
     }
     let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const ac = new AbortController();
+
+    async function loadOnce(attempt: number): Promise<boolean> {
+      const res = await fetch("/api/starlink?tles=1&max=2200", {
+        signal: ac.signal,
+      });
+      const data = (await res.json()) as
+        | (StarlinkStats & { tles: StarlinkTlePair[]; drawn?: number })
+        | { ok: false; error?: string };
+      if (!res.ok || !("ok" in data) || data.ok !== true) {
+        throw new Error(
+          "error" in data && data.error ? String(data.error) : `starlink → ${res.status}`,
+        );
+      }
+      if (cancelled) return false;
+      const tles = data.tles || [];
+      if (!tles.length) throw new Error("starlink empty tles");
+      setStarlinkStats({
+        ok: true,
+        count: data.count,
+        source: data.source,
+        fetchedAt: data.fetchedAt,
+        note:
+          ("note" in data && data.note) ||
+          (data.drawn != null ? `drawing ${data.drawn}` : undefined),
+      });
+      // Yield so StrictMode / paint can settle before heavy satrec parse
+      await new Promise((r) => setTimeout(r, 0));
+      if (cancelled) return false;
+      globeApiRef.current?.setStarlinkTles(tles);
+      starlinkLoadedRef.current = true;
+      setStarlinkError(null);
+      return true;
+    }
+
     async function load() {
       setStarlinkLoading(true);
       setStarlinkError(null);
-      try {
-        const res = await fetch("/api/starlink?tles=1");
-        const data = (await res.json()) as
-          | (StarlinkStats & { tles: StarlinkTlePair[] })
-          | { ok: false; error?: string };
-        if (!res.ok || !("ok" in data) || data.ok !== true) {
-          throw new Error(
-            "error" in data && data.error ? String(data.error) : `starlink → ${res.status}`,
-          );
+      let lastErr: unknown;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        if (cancelled) break;
+        try {
+          const ok = await loadOnce(attempt);
+          if (ok || cancelled) {
+            lastErr = null;
+            break;
+          }
+        } catch (e) {
+          lastErr = e;
+          console.warn(`starlink load attempt ${attempt} failed`, e);
+          if (cancelled || ac.signal.aborted) break;
+          await new Promise((r) => setTimeout(r, 400 * attempt));
         }
-        if (cancelled) return;
-        setStarlinkStats({
-          ok: true,
-          count: data.count,
-          source: data.source,
-          fetchedAt: data.fetchedAt,
-          note: "note" in data ? data.note : undefined,
-        });
-        globeApiRef.current?.setStarlinkTles(data.tles || []);
-        starlinkLoadedRef.current = true;
-      } catch (e) {
-        if (cancelled) return;
-        console.warn("starlink load failed", e);
-        setStarlinkError(String(e));
-        globeApiRef.current?.setStarlinkTles(null);
-      } finally {
-        if (!cancelled) setStarlinkLoading(false);
+      }
+      if (!cancelled) {
+        if (lastErr) {
+          setStarlinkError(String(lastErr));
+          globeApiRef.current?.setStarlinkTles(null);
+        }
+        setStarlinkLoading(false);
       }
     }
+
     void load();
-    const timer = setInterval(load, 30 * 60 * 1000);
+    timer = setInterval(load, 30 * 60 * 1000);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      ac.abort();
+      if (timer) clearInterval(timer);
+      setStarlinkLoading(false);
     };
   }, [showStarlink]);
 
@@ -566,7 +601,7 @@ function App() {
     };
   }, []);
 
-    const clocks = CLOCKS.map((z) => {
+  const clocks = CLOCKS.map((z) => {
     const time = new Intl.DateTimeFormat("en-GB", {
       timeZone: z.timeZone,
       hour: "2-digit",
@@ -747,8 +782,9 @@ function App() {
               <p className="hint">Stats unavailable{starlinkError ? ` · ${starlinkError}` : ""}</p>
             )}
             <p className="hint">
-              Points via chunked SGP4 · toggle layer in Controls
+              ~2.2k thinned Points · chunked SGP4 · toggle in Controls
               {starlinkLoading ? " · updating…" : ""}
+              {starlinkError ? ` · ${starlinkError}` : ""}
             </p>
           </section>
         </aside>

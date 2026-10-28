@@ -746,17 +746,33 @@ export default {
       try {
         const data = await getStarlinkCatalog();
         const includeTles = url.searchParams.get("tles") !== "0";
-        const body = includeTles
-          ? data
-          : {
-              ok: true as const,
-              count: data.count,
-              source: data.source,
-              fetchedAt: data.fetchedAt,
-              catalogUrl: data.catalogUrl,
-              note: data.note,
-              tles: [] as StarlinkTlePair[],
-            };
+        const maxRaw = Number(url.searchParams.get("max") || "2200");
+        const max = Number.isFinite(maxRaw)
+          ? Math.min(8000, Math.max(200, Math.floor(maxRaw)))
+          : 2200;
+        let tles = includeTles ? data.tles : ([] as StarlinkTlePair[]);
+        let drawn = tles.length;
+        if (includeTles && tles.length > max) {
+          const step = Math.ceil(tles.length / max);
+          const thin: StarlinkTlePair[] = [];
+          for (let i = 0; i < tles.length && thin.length < max; i += step) {
+            thin.push(tles[i]!);
+          }
+          tles = thin;
+          drawn = thin.length;
+        }
+        const body = {
+          ok: true as const,
+          count: data.count,
+          drawn,
+          source: data.source,
+          fetchedAt: data.fetchedAt,
+          catalogUrl: data.catalogUrl,
+          note: includeTles
+            ? `${data.note}; response thinned to ${drawn} for globe Points`
+            : data.note,
+          tles,
+        };
         return Response.json(body, {
           headers: {
             "Cache-Control": "public, max-age=600",
