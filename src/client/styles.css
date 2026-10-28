@@ -372,7 +372,7 @@ a:hover {
 
 .globe-wrap {
   position: relative;
-  width: min(100%, 560px);
+  width: min(100%, 640px);
   aspect-ratio: 1 / 1;
   display: block;
   overflow: visible;
@@ -434,8 +434,8 @@ a:hover {
   box-shadow: 0 0 10px rgba(34, 211, 238, 0.9);
 }
 .legend-dot.visitor {
-  background: #38bdf8;
-  box-shadow: 0 0 10px rgba(56, 189, 248, 0.7);
+  background: #fbbf24;
+  box-shadow: 0 0 10px rgba(251, 191, 36, 0.85);
   margin-left: 0.35rem;
 }
 
@@ -680,6 +680,6 @@ a:hover {
     grid-template-columns: 1fr;
   }
   .globe-wrap {
-    width: min(100%, 420px);
+    width: min(100%, 520px);
   }
 }

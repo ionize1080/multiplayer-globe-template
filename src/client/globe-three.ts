@@ -126,19 +126,19 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(44, 1, 0.1, 100);
-  camera.position.set(0, 0.22, 3.55);
+  camera.position.set(0, 0.18, 2.95);
 
   // Pivot: Earth rotates under a *world-fixed* sun (terminator stays real)
   const root = new THREE.Group();
   scene.add(root);
 
   // --- Lighting: soft night ambient + strong sun (Google Earth–like day) ---
-  const ambient = new THREE.AmbientLight(0x8aa0c0, 0.42);
+  const ambient = new THREE.AmbientLight(0x7a90b0, 0.48);
   scene.add(ambient);
   const hemi = new THREE.HemisphereLight(0xb8d4ff, 0x0b1224, 0.22);
   scene.add(hemi);
 
-  const sun = new THREE.DirectionalLight(0xfff6e8, 2.0);
+  const sun = new THREE.DirectionalLight(0xffe8c8, 2.25);
   sun.position.set(5, 0, 0);
   scene.add(sun);
   scene.add(sun.target);
@@ -150,7 +150,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const sunDir = new THREE.Vector3(1, 0, 0);
   // Earth
   const earthGroup = new THREE.Group();
-  earthGroup.scale.setScalar(0.9);
+  earthGroup.scale.setScalar(0.96);
   root.add(earthGroup);
 
   const earthGeo = new THREE.SphereGeometry(1, 96, 96);
@@ -166,10 +166,10 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const dayNightUniforms = {
     uNightMap: { value: null as THREE.Texture | null },
     uSunDir: { value: sunDir.clone() },
-    uDayBoost: { value: 1.15 },
-    uNightFloor: { value: 0.22 },
-    uCityBoost: { value: 1.35 },
-    uTermSoft: { value: 0.28 },
+    uDayBoost: { value: 1.28 },
+    uNightFloor: { value: 0.38 },
+    uCityBoost: { value: 1.75 },
+    uTermSoft: { value: 0.32 },
   };
 
   earthMat.onBeforeCompile = (shader) => {
@@ -209,18 +209,20 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         "#include <map_fragment>",
         `#include <map_fragment>
         float ndl = dot(normalize(vDnNormal), normalize(uSunDir));
-        float dayF = smoothstep(-uTermSoft, uTermSoft * 1.15, ndl);
+        float dayF = smoothstep(-uTermSoft, uTermSoft * 1.2, ndl);
+        // Warm, slightly saturated day (Google Earth–like)
         vec3 dayCol = diffuseColor.rgb * uDayBoost;
+        dayCol = mix(dayCol, dayCol * vec3(1.08, 1.02, 0.92), 0.35);
+        dayCol = mix(vec3(dot(dayCol, vec3(0.299, 0.587, 0.114))), dayCol, 1.18);
         vec3 nightTex = texture2D(uNightMap, vDnUv).rgb;
-        vec3 nightCol = nightTex * uCityBoost + vec3(0.02, 0.04, 0.08);
-        nightCol = max(nightCol, vec3(uNightFloor * 0.35));
-        // Soft mix: day side vibrant, night soft with lights — never pure black
+        vec3 nightCol = nightTex * uCityBoost + vec3(0.04, 0.06, 0.12);
+        nightCol = max(nightCol, vec3(uNightFloor * 0.55));
+        // Soft mix: never pure black night
         diffuseColor.rgb = mix(nightCol, dayCol, dayF);
-        // Keep a hint of city lights near terminator dusk
-        diffuseColor.rgb += nightTex * uCityBoost * 0.12 * (1.0 - dayF) * dayF * 4.0;`,
+        diffuseColor.rgb += nightTex * uCityBoost * 0.18 * (1.0 - dayF) * dayF * 4.0;`,
       );
   };
-  earthMat.customProgramCacheKey = () => "earth-day-night-v2";
+  earthMat.customProgramCacheKey = () => "earth-day-night-r1";
 
   const earth = new THREE.Mesh(earthGeo, earthMat);
   earthGroup.add(earth);
@@ -333,8 +335,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   const atmosUniforms = {
     uGlowColor: { value: new THREE.Color(0x1e3a5f) },
     uRimColor: { value: new THREE.Color(0x7dd3fc) },
-    uIntensity: { value: 0.48 },
-    uPower: { value: 3.6 },
+    uIntensity: { value: 0.62 },
+    uPower: { value: 2.8 },
     uPulse: { value: 0 },
   };
   const atmosMat = new THREE.ShaderMaterial({
@@ -366,11 +368,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         float fresnel = pow(1.0 - abs(dot(viewDir, normalize(vNormal))), uPower);
         fresnel = clamp(fresnel * (uIntensity + uPulse), 0.0, 1.0);
         vec3 col = mix(uGlowColor, uRimColor, fresnel);
-        gl_FragColor = vec4(col, fresnel * 0.4);
+        gl_FragColor = vec4(col, fresnel * 0.55);
       }
     `,
   });
-  earthGroup.add(new THREE.Mesh(new THREE.SphereGeometry(1.03, 64, 64), atmosMat));
+  earthGroup.add(new THREE.Mesh(new THREE.SphereGeometry(1.045, 64, 64), atmosMat));
 
   const hazeMat = new THREE.ShaderMaterial({
     uniforms: {
@@ -399,29 +401,29 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       void main() {
         vec3 viewDir = normalize(cameraPosition - vWorldPos);
         float fresnel = pow(1.0 - abs(dot(viewDir, normalize(vNormal))), 3.4);
-        gl_FragColor = vec4(uColor, fresnel * (0.1 + uPulse * 0.4));
+        gl_FragColor = vec4(uColor, fresnel * (0.18 + uPulse * 0.45));
       }
     `,
   });
-  earthGroup.add(new THREE.Mesh(new THREE.SphereGeometry(1.055, 48, 48), hazeMat));
+  earthGroup.add(new THREE.Mesh(new THREE.SphereGeometry(1.09, 48, 48), hazeMat));
 
   // Visitor markers
   const markerGroup = new THREE.Group();
   earthGroup.add(markerGroup);
   const markerGeo = new THREE.SphereGeometry(1, 12, 12);
   const markerMatSelf = new THREE.MeshStandardMaterial({
-    color: 0xbae6fd,
-    emissive: 0x22d3ee,
-    emissiveIntensity: 0.45,
-    roughness: 0.45,
-    metalness: 0.25,
+    color: 0xfff7ed,
+    emissive: 0xfbbf24,
+    emissiveIntensity: 0.7,
+    roughness: 0.4,
+    metalness: 0.15,
   });
   const markerMatOther = new THREE.MeshStandardMaterial({
-    color: 0x38bdf8,
-    emissive: 0x0284c7,
-    emissiveIntensity: 0.28,
-    roughness: 0.5,
-    metalness: 0.2,
+    color: 0xfed7aa,
+    emissive: 0xf59e0b,
+    emissiveIntensity: 0.45,
+    roughness: 0.45,
+    metalness: 0.1,
   });
   const markerPool: THREE.Mesh[] = [];
 
@@ -440,7 +442,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       }
       mesh.visible = true;
       mesh.material = data.self ? markerMatSelf : markerMatOther;
-      mesh.scale.setScalar(Math.max(0.006, Math.min(0.018, data.size * 0.14)));
+      mesh.scale.setScalar(Math.max(0.01, Math.min(0.028, data.size * 0.22)));
       latLngAltToVec3(data.lat, data.lng, 12, mesh.position);
     }
   }
@@ -477,7 +479,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   earthGroup.add(orbitGlow);
 
   const iss = createIssModel();
-  iss.scale.setScalar(0.028);
+  iss.scale.setScalar(0.042);
   earthGroup.add(iss);
 
   const issGlowTex = makeGlowSprite();
@@ -486,12 +488,12 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       map: issGlowTex,
       color: 0xfbbf24,
       transparent: true,
-      opacity: 0.35,
+      opacity: 0.55,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     }),
   );
-  issGlow.scale.setScalar(0.07);
+  issGlow.scale.setScalar(0.11);
   earthGroup.add(issGlow);
 
   let satrec: satellite.SatRec | null = null;
@@ -611,15 +613,19 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     orbitReady = firstSet;
   }
 
+  // World-fixed sun: set once toward the default camera-facing hemisphere (~half lit).
+  // Does NOT track the camera each frame — Earth rotates under a stable light (Jack: 太阳位置固定).
+  const FIXED_SUN = new THREE.Vector3(0.55, 0.4, 1.0).normalize();
+  sunDir.copy(FIXED_SUN);
+  dayNightUniforms.uSunDir.value.copy(FIXED_SUN);
+  sun.position.copy(FIXED_SUN).multiplyScalar(6);
+  sun.target.position.set(0, 0, 0);
+
   function updateSun(_date: Date) {
-    // Bias sun toward the camera so the facing hemisphere is ~half lit (Google Earth–like).
-    // Real UTC sun often puts day on the far side → tiny crescent; user OK moving sun for visibility.
-    const cam = camera.position;
-    // Front-facing key light with a soft offset (not dead-center specular)
-    sunDir.set(cam.x + 0.55, cam.y + 0.35, cam.z + 0.15).normalize();
-    dayNightUniforms.uSunDir.value.copy(sunDir);
-    sun.position.copy(sunDir).multiplyScalar(6);
-    sun.target.position.set(0, 0, 0);
+    // Keep sun fixed in world space while Earth (root) spins.
+    sunDir.copy(FIXED_SUN);
+    dayNightUniforms.uSunDir.value.copy(FIXED_SUN);
+    sun.position.copy(FIXED_SUN).multiplyScalar(6);
     sun.target.updateMatrixWorld();
   }
 
@@ -682,7 +688,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         iss.rotateX(Math.PI / 2);
       }
 
-      issGlow.scale.setScalar(0.065 + 0.012 * Math.sin(time * 0.004));
+      issGlow.scale.setScalar(0.1 + 0.02 * Math.sin(time * 0.004));
 
       if (time - lastIssEmit > 1000) {
         lastIssEmit = time;
@@ -696,10 +702,15 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       iss.visible = true;
       issGlow.visible = true;
     } else {
-      iss.visible = false;
-      issGlow.visible = false;
+      // Keep ISS visible at last position if orbit already built (transient prop miss);
+      // only hide when we never had a TLE orbit.
+      if (!orbitReady) {
+        iss.visible = false;
+        issGlow.visible = false;
+      }
       if (time - lastIssEmit > 2000) {
         lastIssEmit = time;
+        // Don't clear panel permanently — parent retries TLE; keep last snapshot if any
         opts.onIssUpdate?.(null);
       }
     }

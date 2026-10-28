@@ -184,11 +184,12 @@ async function fetchIss(): Promise<IssData> {
     velocity: number;
     visibility: string;
   }>("https://api.wheretheiss.at/v1/satellites/25544");
+  // WhereTheISS velocity is km/h (~27575) → store as km/s for the panel
   return {
     latitude: data.latitude,
     longitude: data.longitude,
     altitude: data.altitude,
-    velocity: data.velocity,
+    velocity: data.velocity / 3600,
     visibility: data.visibility,
   };
 }

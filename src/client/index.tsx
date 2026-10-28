@@ -90,6 +90,15 @@ function formatSigned(n: number | null, digits = 2): string {
   return `${sign}${n.toFixed(digits)}`;
 }
 
+
+/** Normalize ISS speed to km/s. Live TLE prop is already km/s (~7.66).
+ *  WhereTheISS.at reports ~27575 as km/h → divide by 3600. */
+function formatIssVelocityKms(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  if (v > 100) return v / 3600; // km/h → km/s
+  return v; // already km/s
+}
+
 function useNow(tickMs = 1000) {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -144,18 +153,29 @@ function useIssTle(pollMs = 60 * 60 * 1000) {
   useEffect(() => {
     let cancelled = false;
     let timer: number | undefined;
+    let failStreak = 0;
 
     async function load() {
+      let ok = false;
       try {
         const res = await fetch("/api/iss-tle");
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as TlePayload;
         if (cancelled) return;
-        if (json.line1 && json.line2) setTle([json.line1, json.line2]);
+        if (json.line1 && json.line2) {
+          setTle([json.line1, json.line2]);
+          ok = true;
+          failStreak = 0;
+        }
       } catch {
-        /* keep last good TLE */
+        /* keep last good TLE — never clear on failure */
+        failStreak += 1;
       } finally {
-        if (!cancelled) timer = window.setTimeout(load, pollMs);
+        if (!cancelled) {
+          // Fast retry when TLE missing/failing; hourly when healthy
+          const delay = ok ? pollMs : Math.min(15_000 * Math.max(1, failStreak), 60_000);
+          timer = window.setTimeout(load, delay);
+        }
       }
     }
 
@@ -270,7 +290,7 @@ function App() {
     rotationSpeedRef.current = rotationSpeed;
   }, [rotationSpeed]);
 
-  const [cloudAmount, setCloudAmount] = useState(0.75);
+  const [cloudAmount, setCloudAmount] = useState(0.55);
   const cloudAmountRef = useRef(cloudAmount);
   useEffect(() => {
     cloudAmountRef.current = cloudAmount;
@@ -299,7 +319,7 @@ function App() {
           id: message.position.id,
           lat: message.position.lat,
           lng: message.position.lng,
-          size: message.position.id === socket.id ? 0.07 : 0.04,
+          size: message.position.id === socket.id ? 0.12 : 0.08,
           self: message.position.id === socket.id,
         });
         socketIdRef.current = socket.id;
@@ -464,12 +484,7 @@ function App() {
                   <div>
                     <span className="muted">Velocity</span>
                     <strong>
-                      {/* live TLE prop is km/s; WhereTheISS dashboard feed is m/s */}
-                      {(panelIss.velocity > 100
-                        ? panelIss.velocity / 1000
-                        : panelIss.velocity
-                      ).toFixed(2)}{" "}
-                      km/s
+                      {formatIssVelocityKms(panelIss.velocity).toFixed(2)} km/s
                     </strong>
                   </div>
                   <div>
@@ -478,7 +493,7 @@ function App() {
                   </div>
                 </div>
               </div>
-              <p className="hint">Cyan orbit + metallic ISS model on the globe</p>
+              <p className="hint">Cyan orbit · amber visitors · metallic ISS on the globe</p>
             </section>
           ) : (
             <section className="card error-card">
