@@ -654,6 +654,7 @@ function App() {
                   className={cloudMode === "live" ? "seg active" : "seg"}
                   onClick={() => {
                     setCloudMode("live");
+                    setCloudAmount(0.4); // lighter default so land stays readable
                     setCloudStatus(`加载近实时云图… · ${LIVE_CLOUDS_BUILD}`);
                   }}
                 >
@@ -670,6 +671,11 @@ function App() {
                   title={cloudDate || undefined}
                 >
                   {cloudStatus}
+                </p>
+              ) : null}
+              {cloudMode === "live" ? (
+                <p className="cloud-status" style={{ opacity: 0.75 }}>
+                  近实时默认 Clouds 40%（可调）· 偏亮白云遮罩
                 </p>
               ) : null}
             </div>

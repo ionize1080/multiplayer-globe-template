@@ -42,7 +42,7 @@ const CLOUD_TEX =
 const CLOUD_TEX_FALLBACK =
   "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_clouds_1024.png";
 /** Cache-bust / Aura verify marker — must appear in deployed /dist/index.js */
-export const LIVE_CLOUDS_BUILD = "c6-20261028-async-switch";
+export const LIVE_CLOUDS_BUILD = "c7-20261028-white-seams";
 
 function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new THREE.Vector3()) {
   const r = 1 + altKm / EARTH_RADIUS_KM;
@@ -326,7 +326,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     if (cloudMode === "live") {
       cloudMat.color.set(0xffffff);
       cloudMat.emissive.set(0xffffff);
-      cloudMat.emissiveIntensity = 0.62;
+      cloudMat.emissiveIntensity = 0.9;
       cloudMat.roughness = 1;
       cloudMat.metalness = 0;
     } else {
@@ -352,13 +352,14 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     // Live: global soft fair_clouds shell so orbital barcodes never read empty
     clouds2.visible = on;
     cloudShadow.visible = on;
+    // Live: lighter veil so land stays readable at ~40–55%
     cloudMat.opacity =
-      cloudMode === "live" ? 0.18 + a * 0.55 : 0.12 + a * 0.58;
+      cloudMode === "live" ? 0.06 + a * 0.28 : 0.12 + a * 0.58;
     cloudMat2.opacity =
       cloudMode === "live"
-        ? 0.16 + a * 0.28 // clearly visible animated underlay
+        ? 0.22 + a * 0.34 // strong fair_clouds underlay hides barcodes
         : 0.04 + a * 0.32;
-    cloudShadowMat.opacity = a * (cloudMode === "live" ? 0.14 : 0.32);
+    cloudShadowMat.opacity = a * (cloudMode === "live" ? 0.08 : 0.32);
   }
 
   /** Yield so React can paint / Earth can keep spinning during heavy mask work. */
@@ -373,9 +374,9 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   }
 
   /**
-   * NASA true-color mosaic → soft WHITE clouds + transparent clear sky.
-   * Chunked async (yields every N rows) so mode toggle UI stays responsive.
-   * Build: LIVE_CLOUDS_BUILD
+   * NASA true-color → bright WHITE cloud mask (c7).
+   * Higher lum gate + gamma; fill dark vertical barcode bands with white wisps
+   * + narrow neighbor alpha bleed (not ocean smear). Chunked with rAF yields.
    */
   async function trueColorToCloudMask(url: string): Promise<THREE.CanvasTexture> {
     const res = await fetch(url);
@@ -399,11 +400,14 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const d = id.data;
     const isNodata = new Uint8Array(w * h);
     const colNodata = new Float32Array(w);
+    const colMeanA = new Float32Array(w);
+    const colBright = new Float32Array(w);
     let opaqueN = 0;
     let nodataN = 0;
     const total = w * h;
     const ROW_CHUNK = 32;
 
+    // Bright-white-only extract: kill mid-gray ocean veil / muddy speckles
     for (let y0 = 0; y0 < h; y0 += ROW_CHUNK) {
       const y1 = Math.min(h, y0 + ROW_CHUNK);
       for (let y = y0; y < y1; y++) {
@@ -418,7 +422,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
           const mn = Math.min(r, g, b);
           const sat = mx > 1 ? (mx - mn) / mx : 0;
 
-          const nodata = aIn < 8 || lum < 8;
+          const nodata = aIn < 8 || lum < 10;
           if (nodata) {
             nodataN++;
             isNodata[y * w + x] = 1;
@@ -428,16 +432,23 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
             continue;
           }
 
-          const warm = r - b > 32 && r > 145 && sat > 0.12;
+          // Desert / land warm bright → suppress
+          const warm = r - b > 28 && r > 130 && sat > 0.1;
+          // Only fairly bright, low-sat pixels count as cloud
           let score =
-            Math.min(1, Math.max(0, (lum - 72) / 110)) *
-            Math.min(1, Math.max(0, 1.25 - sat * 1.85));
-          if (warm) score *= 0.18;
-          score = Math.pow(Math.min(1, score * 1.2), 0.82);
-          const alpha = score < 0.04 ? 0 : Math.round(score * 255);
+            Math.min(1, Math.max(0, (lum - 145) / 75)) *
+            Math.min(1, Math.max(0, 1.35 - sat * 2.4));
+          if (warm) score *= 0.12;
+          // Stronger gamma → punchy white cores, sparse thin haze
+          score = Math.pow(Math.min(1, score), 0.55);
+          const alpha = score < 0.08 ? 0 : Math.round(score * 255);
           d[i] = d[i + 1] = d[i + 2] = 255;
           d[i + 3] = alpha;
-          if (alpha > 18) opaqueN++;
+          colMeanA[x]! += alpha;
+          if (alpha > 40) {
+            opaqueN++;
+            colBright[x]! += 1;
+          }
         }
       }
       await yieldFrame();
@@ -445,30 +456,53 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
 
     const coverage = opaqueN / total;
     const nodataRatio = nodataN / total;
-    if (coverage < 0.08) {
+    if (coverage < 0.05) {
       throw new Error(`live cloud coverage too low (${(coverage * 100).toFixed(1)}%)`);
     }
-    if (coverage > 0.92) {
+    if (coverage > 0.85) {
       throw new Error(`live cloud coverage implausible (${(coverage * 100).toFixed(1)}%)`);
     }
     if (nodataRatio > 0.55) {
       throw new Error(`live cloud mosaic too incomplete (nodata ${(nodataRatio * 100).toFixed(0)}%)`);
     }
 
-    for (let x = 0; x < w; x++) colNodata[x]! /= h;
-
-    let medianNd = 0;
-    {
-      const sorted = Array.from(colNodata).sort((a, b) => a - b);
-      medianNd = sorted[Math.floor(sorted.length / 2)]!;
+    for (let x = 0; x < w; x++) {
+      colNodata[x]! /= h;
+      colMeanA[x]! /= h;
+      colBright[x]! /= h;
     }
-    const gapThresh = Math.max(0.145, medianNd + 0.035);
+
+    // Gap = elevated nodata OR dark/empty vertical band (low mean alpha vs neighbors)
+    let medianNd = 0;
+    let medianA = 0;
+    {
+      const sn = Array.from(colNodata).sort((a, b) => a - b);
+      const sa = Array.from(colMeanA).sort((a, b) => a - b);
+      medianNd = sn[Math.floor(sn.length / 2)]!;
+      medianA = sa[Math.floor(sa.length / 2)]!;
+    }
     const gapCol = new Uint8Array(w);
     for (let x = 0; x < w; x++) {
-      if (colNodata[x]! >= gapThresh) gapCol[x] = 1;
+      let localMax = 0;
+      for (let k = Math.max(0, x - 40); k <= Math.min(w - 1, x + 40); k++) {
+        localMax = Math.max(localMax, colMeanA[k]!);
+      }
+      const darkStrip =
+        localMax > 35 && colMeanA[x]! < localMax * 0.38 && colMeanA[x]! < medianA * 0.85;
+      const ndGap = colNodata[x]! >= Math.max(0.14, medianNd + 0.03);
+      if (ndGap || darkStrip) gapCol[x] = 1;
     }
+    // Dilate gap marks 4px so narrow barcodes are fully covered
+    {
+      const copy = gapCol.slice();
+      for (let x = 0; x < w; x++) {
+        if (!copy[x]) continue;
+        for (let k = Math.max(0, x - 4); k <= Math.min(w - 1, x + 4); k++) gapCol[k] = 1;
+      }
+    }
+
     const gapW = new Float32Array(w);
-    const FEATHER = 16;
+    const FEATHER = 14;
     for (let x = 0; x < w; x++) {
       if (!gapCol[x]) continue;
       for (let k = Math.max(0, x - FEATHER); k <= Math.min(w - 1, x + FEATHER); k++) {
@@ -477,7 +511,6 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
       }
     }
 
-    // Prefer already-cached small fallback (avoid sync-decoding 4k on click path)
     let wispData: Uint8ClampedArray | null = null;
     for (const src of [CLOUD_TEX_FALLBACK, CLOUD_TEX]) {
       try {
@@ -494,48 +527,65 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
         wispData = wctx.getImageData(0, 0, w, h).data;
         break;
       } catch {
-        /* try next */
+        /* next */
       }
     }
     await yieldFrame();
 
     function wispAlphaAt(i: number): number {
-      if (!wispData) return 120;
+      if (!wispData) return 140;
       const wl =
         0.299 * wispData[i]! + 0.587 * wispData[i + 1]! + 0.114 * wispData[i + 2]!;
-      return Math.round((wl / 255) * 230);
+      // Bias wisps toward white (lift floor)
+      return Math.round(Math.min(255, (wl / 255) * 200 + 40));
     }
+
+    // Snapshot alphas for neighbor bleed (pre-fill)
+    const liveSnap = new Uint8Array(w * h);
+    for (let p = 0; p < liveSnap.length; p++) liveSnap[p] = d[(p << 2) + 3]!;
 
     for (let y0 = 0; y0 < h; y0 += ROW_CHUNK) {
       const y1 = Math.min(h, y0 + ROW_CHUNK);
       for (let y = y0; y < y1; y++) {
+        const row = y * w;
         for (let x = 0; x < w; x++) {
-          const p = y * w + x;
+          const p = row + x;
           const i = p << 2;
           const gw = gapW[x]!;
-          const live = d[i + 3]!;
+          const live = liveSnap[p]!;
 
-          if (isNodata[p]) {
-            const wa = wispAlphaAt(i);
+          if (!gapCol[x] && !isNodata[p] && gw < 0.08) continue;
+
+          // Narrow neighbor cloud bleed (white alpha only — never ocean RGB)
+          let bleed = 0;
+          const span = 10;
+          let xl = x - 1;
+          while (xl >= 0 && xl >= x - span && (gapCol[xl] || liveSnap[row + xl]! < 30)) xl--;
+          let xr = x + 1;
+          while (xr < w && xr <= x + span && (gapCol[xr] || liveSnap[row + xr]! < 30)) xr++;
+          if (xl >= 0 && xr < w && xl >= x - span && xr <= x + span) {
+            const t = (x - xl) / Math.max(1, xr - xl);
+            bleed = (1 - t) * liveSnap[row + xl]! + t * liveSnap[row + xr]!;
+          } else if (xl >= 0 && xl >= x - span) {
+            bleed = liveSnap[row + xl]! * 0.75;
+          } else if (xr < w && xr <= x + span) {
+            bleed = liveSnap[row + xr]! * 0.75;
+          }
+
+          const wa = wispAlphaAt(i);
+          if (isNodata[p] || gapCol[x]) {
+            // Mix wisp + bleed inside barcode; keep white RGB
+            const fill = Math.max(wa * 0.7, bleed * 0.55);
+            const out = Math.max(live, Math.round(fill));
             d[i] = d[i + 1] = d[i + 2] = 255;
-            d[i + 3] = Math.max(
-              70,
-              Math.min(220, Math.round(wa * (0.75 + 0.25 * Math.max(gw, 0.5)))),
-            );
+            d[i + 3] = Math.max(55, Math.min(200, out));
             continue;
           }
 
-          if (gapCol[x] && live < 55) {
-            const wa = wispAlphaAt(i);
-            const fill = Math.round(wa * 0.55 * (1 - live / 55));
-            d[i + 3] = Math.min(200, live + fill);
-            continue;
-          }
-
-          if (gw > 0.05 && gw < 1 && live > 0) {
-            const wa = wispAlphaAt(i);
-            const mix = gw * 0.55;
-            d[i + 3] = Math.round(live * (1 - mix * 0.35) + wa * mix * 0.5);
+          // Soft edge into gap zone
+          if (gw > 0.08 && live > 0) {
+            const mix = gw * 0.4;
+            d[i + 3] = Math.round(live * (1 - mix * 0.25) + wa * mix * 0.45);
           }
         }
       }
@@ -549,7 +599,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     soft.width = w;
     soft.height = h;
     const sctx = soft.getContext("2d")!;
-    sctx.filter = "blur(1.25px)";
+    sctx.filter = "blur(1.1px)";
     sctx.drawImage(c, 0, 0);
 
     const tex = new THREE.CanvasTexture(soft);
