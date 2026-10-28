@@ -2,11 +2,15 @@ import "./styles.css";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import createGlobe from "cobe";
 import usePartySocket from "partysocket/react";
 import type { LegacyRef } from "react";
 
 import type { OutgoingMessage } from "../shared";
+import {
+  createGlobeThree,
+  type IssSnapshot,
+  type LatLngMarker,
+} from "./globe-three";
 
 type MarketQuote = {
   symbol: string;
@@ -52,13 +56,18 @@ type ClockZone = {
   timeZone: string;
 };
 
+type TlePayload = {
+  name: string;
+  line1: string;
+  line2: string;
+  fetchedAt: string;
+};
+
 const CLOCKS: ClockZone[] = [
   { id: "sg", label: "SGT", city: "Singapore", timeZone: "Asia/Singapore" },
   { id: "sh", label: "CST", city: "Shanghai", timeZone: "Asia/Shanghai" },
   { id: "utc", label: "UTC", city: "Coordinated", timeZone: "UTC" },
 ];
-
-const ISS_MARKER_ID = "__iss__";
 
 function formatPrice(n: number | null, currency: string): string {
   if (n == null || !Number.isFinite(n)) return "—";
@@ -130,6 +139,35 @@ function useDashboard(pollMs = 45_000) {
   return { data, status, error };
 }
 
+function useIssTle(pollMs = 60 * 60 * 1000) {
+  const [tle, setTle] = useState<[string, string] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+
+    async function load() {
+      try {
+        const res = await fetch("/api/iss-tle");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as TlePayload;
+        if (cancelled) return;
+        if (json.line1 && json.line2) setTle([json.line1, json.line2]);
+      } catch {
+        /* keep last good TLE */
+      } finally {
+        if (!cancelled) timer = window.setTimeout(load, pollMs);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [pollMs]);
+  return tle;
+}
+
 function Sparkline({
   values,
   positive,
@@ -171,7 +209,6 @@ function Sparkline({
 }
 
 function AltitudeGauge({ altitudeKm }: { altitudeKm: number | null }) {
-  // ISS typically ~400–430 km
   const min = 350;
   const max = 450;
   const value = altitudeKm ?? 400;
@@ -227,7 +264,7 @@ function App() {
   const canvasRef = useRef<HTMLCanvasElement>();
   const [zoom, setZoom] = useState(1);
   const [counter, setCounter] = useState(0);
-  const [rotationSpeed, setRotationSpeed] = useState(0.008);
+  const [rotationSpeed, setRotationSpeed] = useState(0.004);
   const rotationSpeedRef = useRef(rotationSpeed);
   useEffect(() => {
     rotationSpeedRef.current = rotationSpeed;
@@ -235,20 +272,16 @@ function App() {
 
   const now = useNow(1000);
   const { data, status, error } = useDashboard(45_000);
-  const issRef = useRef<IssData | null>(null);
+  const tle = useIssTle();
+  const tleRef = useRef<[string, string] | null>(null);
   useEffect(() => {
-    issRef.current = data?.iss ?? null;
-  }, [data?.iss]);
+    tleRef.current = tle;
+  }, [tle]);
 
-  const positions = useRef<
-    Map<
-      string,
-      {
-        location: [number, number];
-        size: number;
-      }
-    >
-  >(new Map());
+  const [liveIss, setLiveIss] = useState<IssSnapshot | null>(null);
+
+  const positions = useRef<Map<string, LatLngMarker>>(new Map());
+  const socketIdRef = useRef<string | null>(null);
 
   const socket = usePartySocket({
     room: "default",
@@ -257,13 +290,17 @@ function App() {
       const message = JSON.parse(evt.data as string) as OutgoingMessage;
       if (message.type === "add-marker") {
         positions.current.set(message.position.id, {
-          location: [message.position.lat, message.position.lng],
+          id: message.position.id,
+          lat: message.position.lat,
+          lng: message.position.lng,
           size: message.position.id === socket.id ? 0.1 : 0.05,
+          self: message.position.id === socket.id,
         });
-        setCounter((c) => c + 1);
+        socketIdRef.current = socket.id;
+        setCounter(positions.current.size);
       } else {
         positions.current.delete(message.id);
-        setCounter((c) => c - 1);
+        setCounter(positions.current.size);
       }
     },
   });
@@ -275,70 +312,26 @@ function App() {
       e.preventDefault();
       setZoom((z) => {
         const next = z - e.deltaY * 0.001;
-        return Math.min(3, Math.max(0.5, next));
+        return Math.min(2.4, Math.max(0.55, next));
       });
     };
-    canvas.addEventListener("wheel", handleWheel);
+    canvas.addEventListener("wheel", handleWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", handleWheel);
   }, []);
 
   useEffect(() => {
-    let phi = 0;
-    let width = 520;
+    const canvas = canvasRef.current as HTMLCanvasElement | undefined;
+    if (!canvas) return;
 
-    const onResize = () => {
-      // keep logical size stable; CSS scales
-      width = 520;
-    };
-    onResize();
-    window.addEventListener("resize", onResize);
-
-    const globe = createGlobe(canvasRef.current as HTMLCanvasElement, {
-      devicePixelRatio: 2,
-      width: width * 2,
-      height: width * 2,
-      phi: 0,
-      theta: 0.15,
-      dark: 1,
-      diffuse: 1.1,
-      mapSamples: 18000,
-      mapBrightness: 6.2,
-      baseColor: [0.12, 0.18, 0.32],
-      markerColor: [0.35, 0.85, 1],
-      glowColor: [0.15, 0.25, 0.55],
-      markers: [],
-      opacity: 0.85,
-      onRender: (state) => {
-        // visitor markers
-        const markers = [...positions.current.entries()]
-          .filter(([id]) => id !== ISS_MARKER_ID)
-          .map(([, v]) => v);
-
-        const iss = issRef.current;
-        if (iss) {
-          const pulse = 0.11 + 0.05 * (0.5 + 0.5 * Math.sin(phi * 18));
-          markers.push({
-            location: [iss.latitude, iss.longitude],
-            size: pulse,
-          });
-          positions.current.set(ISS_MARKER_ID, {
-            location: [iss.latitude, iss.longitude],
-            size: pulse,
-          });
-        } else {
-          positions.current.delete(ISS_MARKER_ID);
-        }
-
-        state.markers = markers;
-        state.phi = phi;
-        phi += rotationSpeedRef.current;
-      },
+    const globe = createGlobeThree({
+      canvas,
+      getRotationSpeed: () => rotationSpeedRef.current,
+      getMarkers: () => [...positions.current.values()],
+      getTle: () => tleRef.current,
+      onIssUpdate: (iss) => setLiveIss(iss),
     });
 
-    return () => {
-      window.removeEventListener("resize", onResize);
-      globe.destroy();
-    };
+    return () => globe.destroy();
   }, []);
 
   const clocks = CLOCKS.map((z) => {
@@ -358,6 +351,16 @@ function App() {
     return { ...z, time, date };
   });
 
+  const panelIss = liveIss
+    ? {
+        latitude: liveIss.latitude,
+        longitude: liveIss.longitude,
+        altitude: liveIss.altitude,
+        velocity: liveIss.velocity,
+        visibility: data?.iss?.visibility ?? "—",
+      }
+    : data?.iss;
+
   return (
     <div className="page">
       <div className="bg-grid" aria-hidden />
@@ -368,7 +371,7 @@ function App() {
           <span className="brand-mark" aria-hidden />
           <div>
             <h1>ionize.club</h1>
-            <p className="tagline">Live globe · markets · orbit</p>
+            <p className="tagline">Live globe · markets · ISS orbit</p>
           </div>
         </div>
         <div className="live-pill" title="People currently connected">
@@ -434,34 +437,40 @@ function App() {
             </section>
           )}
 
-          {status === "loading" && !data ? (
+          {status === "loading" && !data && !liveIss ? (
             <SkeletonCard />
-          ) : data?.iss ? (
+          ) : panelIss ? (
             <section className="card iss-card">
               <div className="card-head">
                 <h2>ISS Tracker</h2>
-                <span className="chip glow-chip">live</span>
+                <span className="chip glow-chip">3D · live</span>
               </div>
               <div className="iss-body">
-                <AltitudeGauge altitudeKm={data.iss.altitude} />
+                <AltitudeGauge altitudeKm={panelIss.altitude} />
                 <div className="iss-stats">
                   <div>
                     <span className="muted">Lat / Lon</span>
                     <strong>
-                      {data.iss.latitude.toFixed(2)}°, {data.iss.longitude.toFixed(2)}°
+                      {panelIss.latitude.toFixed(2)}°, {panelIss.longitude.toFixed(2)}°
                     </strong>
                   </div>
                   <div>
                     <span className="muted">Velocity</span>
-                    <strong>{(data.iss.velocity / 1000).toFixed(2)} km/s</strong>
+                    <strong>
+                      {(panelIss.velocity > 100
+                        ? panelIss.velocity / 1000
+                        : panelIss.velocity
+                      ).toFixed(2)}{" "}
+                      km/s
+                    </strong>
                   </div>
                   <div>
                     <span className="muted">Visibility</span>
-                    <strong className="cap">{data.iss.visibility}</strong>
+                    <strong className="cap">{panelIss.visibility}</strong>
                   </div>
                 </div>
               </div>
-              <p className="hint">Orange-cyan pulse marker on the globe</p>
+              <p className="hint">Cyan orbit + metallic ISS model on the globe</p>
             </section>
           ) : (
             <section className="card error-card">
@@ -479,6 +488,10 @@ function App() {
               style={{ transform: `scale(${zoom})` }}
             />
             <div className="globe-ring" aria-hidden />
+            <div className="globe-legend" aria-hidden>
+              <span className="legend-dot iss" /> ISS orbit
+              <span className="legend-dot visitor" /> visitors
+            </div>
           </div>
 
           <div className="speed-control card inline-card">
@@ -489,7 +502,7 @@ function App() {
               id="speedRange"
               type="range"
               min="0"
-              max="0.05"
+              max="0.03"
               step="0.001"
               value={rotationSpeed}
               onChange={(e) => setRotationSpeed(parseFloat(e.target.value))}
@@ -558,9 +571,9 @@ function App() {
 
       <footer className="footer">
         <span>
-          Powered by <a href="https://cobe.vercel.app/">Cobe</a>,{" "}
-          <a href="https://npmjs.com/package/partyserver/">PartyServer</a>, Open-Meteo,
-          WhereTheISS.at & Yahoo Finance
+          Powered by <a href="https://threejs.org/">three.js</a>,{" "}
+          <a href="https://npmjs.com/package/partyserver/">PartyServer</a>, Celestrak TLE,
+          Open-Meteo, WhereTheISS.at & Yahoo Finance
         </span>
       </footer>
     </div>
