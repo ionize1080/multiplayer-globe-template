@@ -1,0 +1,31 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';
+import {geographicTile,splitBounds,climateClasses,landformClasses} from '../src/atlas';
+import {atlasRange,atlasData,atlasRecords,mineralRecord,occurrenceRecord} from '../src/server/atlas';
+test('geographic atlas tiles cover poles and dateline without invalid rectangles',()=>{
+ assert.deepEqual(geographicTile(0,0,0),{west:-180,east:0,north:90,south:-90});assert.deepEqual(geographicTile(0,1,0),{west:0,east:180,north:90,south:-90});
+ for(let z=0;z<=14;z++)for(const x of [0,2**(z+1)-1])for(const y of [0,2**z-1]){const b=geographicTile(z,x,y)!;assert.ok(b.west<b.east&&b.south<b.north&&b.west>=-180&&b.east<=180&&b.south>=-90&&b.north<=90);}
+ assert.equal(geographicTile(1,4,0),null);assert.equal(geographicTile(-1,0,0),null);assert.deepEqual(splitBounds(170,-20,-170,20),[[170,-20,180,20],[-180,-20,-170,20]]);assert.deepEqual(splitBounds(0,20,10,-20),[]);
+ assert.equal(climateClasses.length,30);assert.equal(new Set(climateClasses.map(c=>c.id)).size,30);assert.equal(climateClasses.find(c=>c.id===14)?.code,'Cfa');assert.equal(landformClasses.find(c=>c.id===9)?.code,'Valley');
+});
+test('COG ranges remain bounded and arbitrary upstream URLs or invalid filters are rejected before fetch',async()=>{
+ assert.deepEqual(atlasRange('bytes=0-65535'),{start:0,end:65535});for(const s of [null,'bytes=0-','bytes=0-5,10-15','bytes=-5-4','bytes=0-2097152','bytes=84766175540-84766175541'])assert.equal(atlasRange(s),null);
+ const original=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('unexpected upstream');};
+ try{for(const path of ['/api/globe/atlas/climate/8/0/0','/api/globe/atlas/climate/7/999/0','/api/globe/atlas/plants/15/0/0.png','/api/globe/atlas/animals/0/0/0.png?taxon=12345','/api/globe/atlas/landform/data?url=https://example.com'])assert.equal((await atlasData(new Request('https://test'+path),{} as ExecutionContext)).status,400);
+ for(const query of ['layer=minerals&west=0&south=0&east=1&north=1&filter=AU%27','layer=animals&west=0&south=0&east=1&north=1&taxon=0','layer=plants&west=0&south=20&east=1&north=1'])assert.equal((await atlasRecords(new Request('https://test/api/globe/atlas/records?'+query))).status,400);assert.equal(calls,0);
+ }finally{globalThis.fetch=original;}
+});
+test('range cache shares only validated public blocks and never accepts a full 84GB response',async()=>{
+ const original=globalThis.fetch,old=Object.getOwnPropertyDescriptor(globalThis,'caches'),cache=new Map<string,Response>();Object.defineProperty(globalThis,'caches',{configurable:true,value:{default:{match:async(r:Request)=>cache.get(r.url)?.clone(),put:async(r:Request,v:Response)=>{cache.set(r.url,v);}}}});let calls=0;const pending:Promise<unknown>[]=[];const ctx={waitUntil:(p:Promise<unknown>)=>pending.push(p)} as ExecutionContext;
+ try{globalThis.fetch=async(input,init)=>{calls++;assert.ok(String(input).startsWith('https://s3.opengeohub.org/'));assert.equal(new Headers(init?.headers).get('Range'),'bytes=10-13');assert.equal(new Headers(init?.headers).get('Cookie'),null);return new Response(new Uint8Array([1,2,3,4]),{status:206,headers:{'Content-Range':'bytes 10-13/84766175540'}});};
+ const req=()=>new Request('https://test/api/globe/atlas/landform/data',{headers:{Range:'bytes=10-13',Cookie:'private-session'}});const a=await atlasData(req(),ctx);assert.equal(a.status,206);assert.deepEqual([...new Uint8Array(await a.arrayBuffer())],[1,2,3,4]);await Promise.all(pending);const b=await atlasData(req(),ctx);assert.equal(b.status,206);assert.equal(calls,1);assert.match(b.headers.get('Cache-Control')!,/^private/);
+ globalThis.fetch=async()=>new Response('entire file is forbidden');assert.equal((await atlasData(new Request('https://test/api/globe/atlas/landform/data',{headers:{Range:'bytes=20-23'}}),ctx)).status,502);
+ }finally{globalThis.fetch=original;if(old)Object.defineProperty(globalThis,'caches',old);else delete (globalThis as {caches?:unknown}).caches;}
+});
+test('records preserve uncertainty and provenance, reject bad positions, and separate dateline queries',async()=>{
+ const p=occurrenceRecord({key:10,decimalLatitude:0,decimalLongitude:179,scientificName:'Test species',coordinateUncertaintyInMeters:0,dataGeneralizations:'obscured',license:'https://creativecommons.org/licenses/by/4.0/'},'plants')!;assert.equal(p.uncertainty,0);assert.equal(p.generalized,true);assert.equal(p.url,'https://www.gbif.org/occurrence/10');assert.equal(occurrenceRecord({key:1,decimalLatitude:91,decimalLongitude:0},'animals'),null);assert.equal(occurrenceRecord({key:1,decimalLatitude:0,decimalLongitude:0,occurrenceStatus:'ABSENT'},'animals'),null);
+ const m=mineralRecord({attributes:{DEP_ID:'10001',SITE_NAME:'Mine',CODE_LIST:' CU AU',Grade:'B',URL:'https://evil.invalid'},geometry:{x:0,y:0}})!;assert.equal(m.detail,'铜 · 金');assert.equal(m.quality,'B');assert.ok(m.url.startsWith('https://mrdata.usgs.gov/'));
+ const original=globalThis.fetch,queries:string[]=[];globalThis.fetch=async input=>{const u=new URL(String(input));queries.push(u.searchParams.get('decimalLongitude')!);assert.equal(u.searchParams.get('hasGeospatialIssue'),'false');return Response.json({count:2,endOfRecords:false,results:[{key:10,decimalLatitude:0,decimalLongitude:179,scientificName:'Test species'}]});};try{const r=await atlasRecords(new Request('https://test/api/globe/atlas/records?layer=plants&west=170&south=-1&east=-170&north=1'));const d=await r.json() as any;assert.deepEqual(queries.sort(),['-180,-170','170,180']);assert.equal(d.records.length,1);assert.equal(d.total,4);assert.equal(d.truncated,true);}finally{globalThis.fetch=original;}
+});
+test('mineral filters match whole commodity codes rather than substrings such as cobalt CO and coal COA',async()=>{
+ const original=globalThis.fetch;let where='';globalThis.fetch=async input=>{where=new URL(String(input)).searchParams.get('where')!;return Response.json({features:[]});};try{const r=await atlasRecords(new Request('https://test/api/globe/atlas/records?layer=minerals&west=-120&south=39&east=-119&north=40&filter=CO'));assert.equal(r.status,200);assert.ok(where.includes("CODE_LIST LIKE '% CO %'"));assert.ok(where.includes("CODE_LIST = 'CO'"));assert.ok(!where.includes("LIKE '%CO%'"));}finally{globalThis.fetch=original;}
+});
