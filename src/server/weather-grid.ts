@@ -1,9 +1,6 @@
-export async function weatherGrid(request: Request): Promise<Response> {
-  // Fixed coordinates prevent unbounded user-driven requests; shared edge cache.
-  const cache=await caches.open('globe-weather-v1');
-  const key=new Request(new URL('/_weather-grid-v1',request.url));
-  const cached=await cache.match(key);
-  if(cached)return new Response(cached.body,{headers:{'Content-Type':'application/json','Cache-Control':'private, max-age=600'}});
+import {weatherData} from './weather-access';
+export async function weatherGrid(request: Request, db: D1Database): Promise<Response> {
+  const data=await weatherData(db,'global-grid-v2',264,10800,async()=>{
   const points: {lat:number,lon:number}[]=[];
   for(let lat=-75;lat<=75;lat+=15)for(let lon=-180;lon<180;lon+=15)points.push({lat,lon});
   const url=new URL('https://api.open-meteo.com/v1/forecast');
@@ -17,7 +14,7 @@ export async function weatherGrid(request: Request): Promise<Response> {
     const c=rows[i].current;
     return {...p,time:c?.time ? c.time+'Z':null,temperature:typeof c?.temperature_2m==='number'?c.temperature_2m:null,wind:typeof c?.wind_speed_10m==='number'?c.wind_speed_10m:null,direction:typeof c?.wind_direction_10m==='number'?c.wind_direction_10m:null};
   })};
-  const response=Response.json(data,{headers:{'Cache-Control':'public, max-age=10800'}});
-  await cache.put(key,response.clone());
-  return new Response(response.body,{headers:{'Content-Type':'application/json','Cache-Control':'private, max-age=600'}});
+  return data;
+  });
+  return Response.json(data,{headers:{'Cache-Control':'private, max-age=600'}});
 }

@@ -1,5 +1,6 @@
+import { weatherPoint, WeatherLimit } from './weather-access';
 import { cloudWidth, cloudMetadata, cloudTexture } from "./clouds";
-import { authRoute, globeUser } from './globe-auth';
+import { authRoute, globeUser, digest } from './globe-auth';
 import { weatherGrid } from './weather-grid';
 import { routePartykitRequest, Server } from "partyserver";
 
@@ -630,10 +631,12 @@ export default {
       try {
         const auth=await authRoute(request,env.MAIL_DB);
         if(auth)return auth;
-        if(!await globeUser(request,env.MAIL_DB))return Response.json({error:'请先使用 IONACS 邮箱登录'},{status:401,headers:{'Cache-Control':'no-store'}});
-        if(request.method==='GET'&&url.pathname==='/api/globe/weather')return await weatherGrid(request);
+        const user=await globeUser(request,env.MAIL_DB);
+        if(!user)return Response.json({error:'请先使用 IONACS 邮箱登录'},{status:401,headers:{'Cache-Control':'no-store'}});
+        if(request.method==='GET'&&url.pathname==='/api/globe/weather')return await weatherGrid(request,env.MAIL_DB);
+        if(request.method==='GET'&&url.pathname==='/api/globe/point')return await weatherPoint(request,env.MAIL_DB,await digest(user.email));
         if(request.method==='GET'&&url.pathname==='/api/globe/clouds')return Response.json(await cloudMetadata(4096),{headers:{'Cache-Control':'private, max-age=300'}});
-      } catch { return Response.json({error:'服务暂不可用，请稍后重试'},{status:503,headers:{'Cache-Control':'no-store'}}); }
+      } catch(error) { if(error instanceof WeatherLimit)return Response.json({error:error.message},{status:429,headers:{'Cache-Control':'no-store','Retry-After':'60'}});return Response.json({error:'服务暂不可用，请稍后重试'},{status:503,headers:{'Cache-Control':'no-store'}}); }
     }
 
     if (request.method === "GET" && url.pathname === "/api/location") {

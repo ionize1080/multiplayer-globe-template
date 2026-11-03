@@ -715,7 +715,7 @@ function App() {
     : data?.iss;
 
   return (
-    <div className="page">
+    <div className={interactionMode === 'drag' && globeUser ? 'page page--explore' : 'page'}>
       <div className="bg-grid" aria-hidden />
       <div className="bg-glow" aria-hidden />
 
@@ -918,7 +918,7 @@ function App() {
                 className="globe-canvas"
               />
             </div>
-            {interactionMode === 'drag' && globeUser && <Suspense fallback={<div className="explorer-loading">加载探索模式…</div>}><Explorer onExpired={()=>{setGlobeUser(null);setInteractionMode('rotate');}}/></Suspense>}
+            {interactionMode === 'drag' && globeUser && <Suspense fallback={<div className="explorer-loading">加载探索模式…</div>}><Explorer onExit={()=>setInteractionMode('rotate')} onExpired={()=>{setGlobeUser(null);setInteractionMode('rotate');}}/></Suspense>}
           </div>
           <div className="globe-legend" aria-hidden style={{visibility:interactionMode === 'drag' && globeUser ? 'hidden':'visible'}}>
             <span className="legend-dot iss" /> ISS
