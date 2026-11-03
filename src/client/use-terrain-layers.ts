@@ -1,3 +1,4 @@
+import {terrainImageryRectangle} from './terrain-imagery';
 import {visibleRectangle} from './visible-rectangle';
 import {useEffect,useRef,useState,type RefObject} from 'react';
 import type {Viewer,ImageryLayer} from 'cesium';
@@ -19,7 +20,7 @@ export function useTerrainLayers(viewer:RefObject<Viewer|null>,ready:boolean,opt
     let cancelled=false,retireTimer:ReturnType<typeof setTimeout>|undefined;setError('');
     void (async()=>{
       const C=await import('cesium'),v=viewer.current,source=data.current;if(cancelled||!v||!source)return;
-      const provider=new C.UrlTemplateImageryProvider({url:'/api/globe/terrain/{z}/{x}/{y}.png',minimumLevel:plan.minimumLevel,rectangle:C.Rectangle.fromDegrees(plan.west,plan.south,plan.east,plan.north),maximumLevel:TERRAIN_MAX_LEVEL,tilingScheme:new C.WebMercatorTilingScheme(),enablePickFeatures:false,credit:new C.Credit('<a href="/data/terrain-attribution.html" target="_blank">Terrain: Mapzen / source credits</a>',true)});
+      const provider=new C.UrlTemplateImageryProvider({url:'/api/globe/terrain/{z}/{x}/{y}.png',minimumLevel:plan.minimumLevel,rectangle:terrainImageryRectangle(C,plan),maximumLevel:TERRAIN_MAX_LEVEL,tilingScheme:new C.WebMercatorTilingScheme(),enablePickFeatures:false,credit:new C.Credit('<a href="/data/terrain-attribution.html" target="_blank">Terrain: Mapzen / source credits</a>',true)});
       // Never mutate imageryLayers inside Cesium's requestImage traversal.
       const clearRetired=()=>{if(retireTimer!==undefined)return;retireTimer=setTimeout(()=>{retireTimer=undefined;if(cancelled||v.isDestroyed())return;for(const old of retired.current)if(v.imageryLayers.contains(old))v.imageryLayers.remove(old);retired.current=[];v.scene.requestRender();},0);};
       provider.requestImage=(x:number,y:number,z:number)=>{
