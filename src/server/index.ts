@@ -2,7 +2,7 @@ import {satelliteScene,satelliteImage,SatelliteError} from './satellite';
 import {pointLocation} from './location-details';
 import { searchPlaces } from './place-search';
 import { cityWeather } from './weather-cities';
-import { weatherPoint, WeatherLimit } from './weather-access';
+import { weatherPoint, visibleCityWeather, WeatherLimit } from './weather-access';
 import { terrainTile } from './terrain';
 import { cloudWidth, cloudMetadata, cloudTexture } from "./clouds";
 import { authRoute, globeUser, digest } from './globe-auth';
@@ -643,6 +643,7 @@ export default {
         if(request.method==='GET'&&url.pathname.startsWith('/api/globe/satellite/image/'))return await satelliteImage(request,env,await digest(user.email),ctx);
         if(request.method==='GET'&&url.pathname==='/api/globe/location')return await pointLocation(request,env.MAIL_DB,await digest(user.email));
         if(request.method==='GET'&&url.pathname==='/api/globe/search')return await searchPlaces(request,env.MAIL_DB,await digest(user.email));
+        if(request.method==='GET'&&url.pathname==='/api/globe/city-points')return await visibleCityWeather(request,env.MAIL_DB,await digest(user.email));
         if(request.method==='GET'&&url.pathname==='/api/globe/cities')return await cityWeather(env.MAIL_DB);
         if(request.method==='GET'&&url.pathname==='/api/globe/weather')return await weatherGrid(request,env.MAIL_DB);
         if(request.method==='GET'&&url.pathname==='/api/globe/tile')return await weatherTile(request,env.MAIL_DB,await digest(user.email));

@@ -1,3 +1,4 @@
+import type {PointWeather} from '../weather-point';
 import {useSatellite} from './use-satellite';
 import type {SatelliteMode} from '../satellite';
 import {PointLocation} from './point-location';
@@ -9,9 +10,8 @@ import {PlaceSearch} from './place-search';
 import {useReferenceLayers} from './use-reference-layers';
 import {useWeatherLayers} from './use-weather-layers';
 import {useTerrainLayers} from './use-terrain-layers';
-import React,{useEffect,useRef,useState} from 'react';
+import React,{useEffect,useRef,useState,useMemo} from 'react';
 import type {Viewer,ImageryLayer} from 'cesium';
-type PointWeather={time:string,sampleLatitude:number,sampleLongitude:number,current:Record<string,number|string|null>,units:Record<string,string>};
 export default function Explorer({onExpired,onExit,onLogout}:{onExpired:()=>void,onExit:()=>void,onLogout?:()=>void}) {
   const container=useRef<HTMLDivElement>(null), viewer=useRef<Viewer|null>(null);
   const [ready,setReady]=useState(false),[error,setError]=useState(''),[clouds,setClouds]=useState(false),[cloudStrength,setCloudStrength]=useState(.6),[temperature,setTemperature]=useState(true),[wind,setWind]=useState(false),[boundaries,setBoundaries]=useState(true),[labels,setLabels]=useState(false),[opacity,setOpacity]=useState(.78),[cloudNote,setCloudNote]=useState(''),[height,setHeight]=useState(''),[selected,setSelected]=useState('');
@@ -22,9 +22,9 @@ export default function Explorer({onExpired,onExit,onLogout}:{onExpired:()=>void
   const [satelliteMode,setSatelliteMode]=useState<SatelliteMode>('latest');
   const radar=useRadar(viewer,ready,radarEnabled);
   const choose=(value:WeatherField|'wind'|'radar'|'satellite')=>{setTemperature(value!=='wind'&&value!=='radar'&&value!=='satellite');setWind(value==='wind');setRadarEnabled(value==='radar');setClouds(value==='satellite');if(value!=='wind'&&value!=='radar'&&value!=='satellite')setField(value);};
-  const pickCity=(p:{lat:number;lon:number})=>{setPicked(p);void import('cesium').then(C=>{const v=viewer.current;if(!v)return;v.entities.removeById('weather-point');v.entities.add({id:'weather-point',position:C.Cartesian3.fromDegrees(p.lon,p.lat),point:{pixelSize:10,color:C.Color.fromCssColorString('#7dd3fc'),outlineColor:C.Color.WHITE,outlineWidth:2}});v.camera.cancelFlight();v.camera.flyTo({destination:C.Cartesian3.fromDegrees(p.lon,p.lat,Math.min(160000,v.camera.positionCartographic.height)),duration:1});});};
+  const pickCity=(p:{lat:number;lon:number;name?:string})=>{setPicked(p);void import('cesium').then(C=>{const v=viewer.current;if(!v)return;v.entities.removeById('weather-point');v.entities.add({id:'weather-point',position:C.Cartesian3.fromDegrees(p.lon,p.lat),point:{pixelSize:10,color:C.Color.fromCssColorString('#7dd3fc'),outlineColor:C.Color.WHITE,outlineWidth:2}});v.camera.cancelFlight();v.camera.flyTo({destination:C.Cartesian3.fromDegrees(p.lon,p.lat,Math.min(160000,v.camera.positionCartographic.height)),duration:1});});};
   const windLayer=useRef<ImageryLayer|null>(null),weatherLayer=useRef<ImageryLayer|null>(null),cloudLayer=useRef<ImageryLayer|null>(null);
-  const [picked,setPicked]=useState<{lat:number,lon:number}|null>(null),[pointWeather,setPointWeather]=useState<PointWeather|null>(null),[pointError,setPointError]=useState(''),[pointLoading,setPointLoading]=useState(false);
+  const [picked,setPicked]=useState<{lat:number,lon:number,name?:string}|null>(null),[pointWeather,setPointWeather]=useState<(PointWeather&{queryLat:number;queryLon:number})|null>(null),[pointError,setPointError]=useState(''),[pointLoading,setPointLoading]=useState(false);
   const [elevation,setElevation]=useState(false),[hillshade,setHillshade]=useState(false),[contours,setContours]=useState(false),[terrainOpacity,setTerrainOpacity]=useState(.75),[pointElevation,setPointElevation]=useState<number|null>(null),[elevationError,setElevationError]=useState('');
   const weatherEnabled=clouds||temperature||wind||radarEnabled||citiesEnabled,inspectEnabled=weatherEnabled||elevation||hillshade||contours||baseMap==='recent',weatherEnabledRef=useRef(inspectEnabled),pointSequence=useRef(0);
   weatherEnabledRef.current=inspectEnabled;
@@ -32,9 +32,16 @@ export default function Explorer({onExpired,onExit,onLogout}:{onExpired:()=>void
   useEffect(()=>{
     if(!picked||!weatherEnabled){setPointWeather(null);setPointError('');setPointLoading(false);return;}const abort=new AbortController(),sequence=++pointSequence.current;
     setPointLoading(true);setPointError('');setPointWeather(null);
-    // Brief debounce coalesces successive map clicks before spending quota.
-    const timer=setTimeout(()=>{void (async()=>{try{const response=await fetch(`/api/globe/point?v=2&lat=${picked.lat}&lon=${picked.lon}`,{signal:abort.signal});if(response.status===401){onExpired();return;}const data=await response.json().catch(()=>({error:'天气服务暂不可用，请稍后重试'}));if(!response.ok)throw Error(data.error||'天气数据暂不可用');if(sequence===pointSequence.current)setPointWeather(data);}catch(error){if(!abort.signal.aborted&&sequence===pointSequence.current)setPointError(error instanceof Error?error.message:'天气数据暂不可用');}finally{if(!abort.signal.aborted&&sequence===pointSequence.current)setPointLoading(false);}})();},350);
-    return()=>{abort.abort();clearTimeout(timer);};
+    let retry:ReturnType<typeof setTimeout>|undefined,busy=false;
+    const update=async(attempt=0)=>{if(busy||abort.signal.aborted)return;retry=undefined;busy=true;try{
+      const response=await fetch(`/api/globe/point?v=3&lat=${picked.lat}&lon=${picked.lon}`,{signal:abort.signal,cache:'no-store'});
+      if(response.status===401){onExpired();return;}const data=await response.json().catch(()=>({error:'天气服务暂不可用，请稍后重试'}));
+      if(!response.ok){if(data.code==='POINT_UPDATING'&&attempt<3){retry=setTimeout(()=>void update(attempt+1),1000*(attempt+1));return;}throw Error(data.error||'天气数据暂不可用');}
+      if(sequence===pointSequence.current){setPointWeather({...data,queryLat:picked.lat,queryLon:picked.lon});setPointError('');}
+    }catch(error){if(!abort.signal.aborted&&sequence===pointSequence.current)setPointError(error instanceof Error?error.message:'天气数据暂不可用');}finally{busy=false;if(!retry&&!abort.signal.aborted&&sequence===pointSequence.current)setPointLoading(false);}};
+    // Coalesce clicks, then refresh from the same cache used by city labels.
+    const timer=setTimeout(()=>void update(),350),interval=setInterval(()=>void update(),60000);
+    return()=>{abort.abort();clearTimeout(timer);clearTimeout(retry);clearInterval(interval);};
   },[picked,weatherEnabled]);
   useEffect(()=>{
     setPointElevation(null);setElevationError('');if(!picked)return;let cancelled=false;
@@ -89,7 +96,7 @@ export default function Explorer({onExpired,onExit,onLogout}:{onExpired:()=>void
     void update();const timer=setInterval(update,15*60000);
     return()=>{cancelled=true;abort.abort();clearInterval(timer);const v=viewer.current;if(v&&cloudLayer.current){v.imageryLayers.remove(cloudLayer.current);cloudLayer.current=null;v.scene.requestRender();}};
   },[ready,clouds]);
-  const {note,samples}=useWeatherLayers(viewer,ready,temperature,wind,opacityRef,weatherLayer,windLayer,restack,onExpired,field,citiesEnabled);
+  const {note}=useWeatherLayers(viewer,ready,temperature,wind,opacityRef,weatherLayer,windLayer,restack,onExpired,field);
   useEffect(()=>{if(weatherLayer.current)weatherLayer.current.alpha=opacity;viewer.current?.scene.requestRender();},[opacity]);
   useEffect(()=>{if(cloudLayer.current)cloudLayer.current.alpha=cloudStrength;viewer.current?.scene.requestRender();},[cloudStrength]);
   const referenceNote=useReferenceLayers(viewer,ready,boundaries,labels);
@@ -99,10 +106,11 @@ export default function Explorer({onExpired,onExit,onLogout}:{onExpired:()=>void
   const metric=(key:string,digits=1)=>{const value=pointWeather?.current[key];return typeof value==='number'&&Number.isFinite(value)?value.toFixed(digits):'—';};
   const closePoint=()=>{setPicked(null);viewer.current?.entities.removeById('weather-point');viewer.current?.scene.requestRender();};
   const condition=()=>{const code=Number(pointWeather?.current.weather_code);if(code===0)return '晴';if(code<=3)return ['晴','大部晴朗','局部多云','阴'][code];if(code===45||code===48)return '雾';if(code>=51&&code<=57)return '毛毛雨';if(code>=61&&code<=67)return '雨';if(code>=71&&code<=77)return '雪';if(code>=80&&code<=82)return '阵雨';if(code===85||code===86)return '阵雪';if(code>=95)return '雷暴';return '暂无天气状况';};
+  const selectedWeather=useMemo(()=>picked&&pointWeather&&pointWeather.queryLat===picked.lat&&pointWeather.queryLon===picked.lon?{...picked,weather:pointWeather}:null,[picked,pointWeather]);
   const fields=[['体感温度','apparent_temperature','°C',1],['相对湿度','relative_humidity_2m','%',0],['风速 · 10 m','wind_speed_10m','m/s',1],['风向 · 来向','wind_direction_10m','°',0],['阵风 · 10 m','wind_gusts_10m','m/s',1],['海平面气压','pressure_msl','hPa',1],['降水 · 统计时段','precipitation','mm',1],['总云量','cloud_cover','%',0]] as const;
   return <div className={picked?'explorer explorer--details':'explorer'}><div className="explorer-map">
     <div ref={container} className="explorer-canvas"/>
-    <CityWeather density={placeDensity} samples={samples} viewer={viewer} ready={ready} enabled={citiesEnabled||labels} showTemperature={citiesEnabled} onPick={pickCity} onExpired={onExpired}/>
+    <CityWeather density={placeDensity} selectedWeather={selectedWeather} viewer={viewer} ready={ready} enabled={citiesEnabled||labels} showTemperature={citiesEnabled} onPick={pickCity} onExpired={onExpired}/>
     <PlaceSearch onExpired={onExpired} onPick={p=>{setPicked(p);setSelected(p.name);void import('cesium').then(C=>{const v=viewer.current;if(!v)return;v.entities.removeById('weather-point');v.entities.add({id:'weather-point',position:C.Cartesian3.fromDegrees(p.lon,p.lat),point:{pixelSize:12,color:C.Color.fromCssColorString('#7dd3fc'),outlineColor:C.Color.WHITE,outlineWidth:2}});const height=p.kind==='country'||p.kind==='ocean'?6000000:p.kind==='state'?2000000:p.kind==='city'?160000:p.kind==='coordinate'?30000:6000;v.camera.cancelFlight();v.camera.flyTo({destination:C.Cartesian3.fromDegrees(p.lon,p.lat,height),duration:1.2});});}}/>
     <nav className="weather-dock" aria-label="天气图层快速切换">{(['temperature','wind','radar','satellite','humidity','pressure','cloud'] as const).map((value,i)=><button key={value} aria-pressed={value==='wind'?wind:value==='radar'?radarEnabled:value==='satellite'?clouds:temperature&&field===value} onClick={()=>choose(value)}><span>{['◉','≋','◌','☁','◒','◎','◐'][i]}</span>{value==='wind'?'风场':value==='radar'?'雷达':value==='satellite'?'卫星云图':weatherFields[value].label}</button>)}</nav>
     {radarEnabled&&<section className="radar-timeline" aria-label="雷达历史回放"><div><button disabled={radar.frames.length<2} onClick={()=>radar.setPlaying(!radar.playing)} aria-label={radar.playing?'暂停雷达回放':'播放雷达历史'}>{radar.playing?'Ⅱ':'▶'}</button><strong>降水雷达</strong><time>{radar.frames[radar.index]?new Date(radar.frames[radar.index].time*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'加载中…'}</time><span>过去 2 小时</span></div><input aria-label="雷达历史时间" type="range" min="0" max={Math.max(0,radar.frames.length-1)} value={radar.index} disabled={!radar.frames.length} onChange={e=>{radar.setPlaying(false);radar.setIndex(+e.target.value);}}/><p>{radar.error||'帧生成时间 · 每 10 分钟一帧 · 回放每 10 秒前进一帧'}<br/>覆盖因地区而异，空白不代表无降水 · <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer ↗</a></p></section>}
@@ -147,7 +155,7 @@ export default function Explorer({onExpired,onExit,onLogout}:{onExpired:()=>void
     {picked&&<aside className="weather-details" aria-label="点位详情">
       <header className="weather-details-heading"><div><span className="weather-eyebrow">LOCATION INSIGHTS</span><h2>点位详情</h2></div><button type="button" onClick={closePoint} aria-label="关闭点位详情">×</button></header>
       <p className="weather-coordinates">{Math.abs(picked.lat).toFixed(4)}° {picked.lat>=0?'N':'S'}　{Math.abs(picked.lon).toFixed(4)}° {picked.lon>=0?'E':'W'}</p>
-      <PointLocation lat={picked.lat} lon={picked.lon} onExpired={onExpired}/>
+      {picked.name&&<p className="weather-coordinates">地点：{picked.name}</p>}<PointLocation lat={picked.lat} lon={picked.lon} onExpired={onExpired}/>
       <section className="point-elevation" aria-label="海拔详情"><span>地形海拔</span><strong>{pointElevation===null?'—':Math.round(pointElevation).toLocaleString()}<small>m</small></strong><p role="status">{elevationError||(pointElevation===null?'正在读取海拔…':pointElevation<0?'低于海平面；海域为海底地形，非水面高度。':'DEM 高程估计；水域不表示水深或实时水位。')}</p><a href="/data/terrain-attribution.html" target="_blank" rel="noreferrer">Mapzen · 数据来源与精度 ↗</a></section>
       <div className="weather-point-status" role="status" aria-live="polite">{pointLoading?'正在获取该点天气…':pointError||(pointWeather?new Date(pointWeather.time).toLocaleString()+' · 模型有效时间':'')}</div>
       {pointWeather&&<><div className="weather-temperature"><span>{metric('temperature_2m')}</span><span>°C</span><p>空气温度 · 地表上方 2 m，非水温</p></div>
