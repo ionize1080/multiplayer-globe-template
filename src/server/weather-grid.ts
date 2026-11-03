@@ -12,7 +12,7 @@ export async function weatherTile(request:Request,db:D1Database,userKey:string):
       const points:{lat:number;lon:number}[]=[];
       for(let y=0;y<5;y++)for(let x=0;x<5;x++)points.push({lat:Number((tile.south+y*tile.resolution).toFixed(6)),lon:Number((tile.west+x*tile.resolution).toFixed(6))});
       const upstream=new URL('https://api.open-meteo.com/v1/forecast');
-      upstream.search=new URLSearchParams({latitude:points.map(p=>p.lat).join(','),longitude:points.map(p=>p.lon).join(','),current:'temperature_2m,wind_speed_10m,wind_direction_10m',wind_speed_unit:'ms',timezone:'UTC',forecast_days:'1',elevation:'nan',cell_selection:'nearest',models:'best_match'}).toString();
+      upstream.search=new URLSearchParams({latitude:points.map(p=>p.lat).join(','),longitude:points.map(p=>p.lon).join(','),current:'temperature_2m,wind_speed_10m,wind_direction_10m',wind_speed_unit:'ms',timezone:'UTC',forecast_days:'1',elevation:points.map(()=>'nan').join(','),cell_selection:'nearest',models:'best_match'}).toString();
       const response=await fetch(upstream,{signal:AbortSignal.timeout(25000)});
       if(!response.ok)throw Error('Weather provider unavailable');
       type Row={current?:{time?:string;temperature_2m?:number;wind_speed_10m?:number;wind_direction_10m?:number}};
@@ -35,7 +35,7 @@ export async function weatherGrid(request: Request, db: D1Database): Promise<Res
   const points: {lat:number,lon:number}[]=[];
   for(let lat=-75;lat<=75;lat+=15)for(let lon=-180;lon<180;lon+=15)points.push({lat,lon});
   const url=new URL('https://api.open-meteo.com/v1/forecast');
-  url.search=new URLSearchParams({latitude:points.map(p=>p.lat).join(','),longitude:points.map(p=>p.lon).join(','),current:'temperature_2m,wind_speed_10m,wind_direction_10m',wind_speed_unit:'ms',timezone:'UTC',forecast_days:'1',elevation:'nan',cell_selection:'nearest'}).toString();
+  url.search=new URLSearchParams({latitude:points.map(p=>p.lat).join(','),longitude:points.map(p=>p.lon).join(','),current:'temperature_2m,wind_speed_10m,wind_direction_10m',wind_speed_unit:'ms',timezone:'UTC',forecast_days:'1',elevation:points.map(()=>'nan').join(','),cell_selection:'nearest'}).toString();
   const res=await fetch(url,{signal:AbortSignal.timeout(25000)});
   if(!res.ok)throw new Error('Weather provider unavailable');
   type Entry={current?:{time?:string,temperature_2m?:number,wind_speed_10m?:number,wind_direction_10m?:number}};

@@ -2,8 +2,24 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {Miniflare} from 'miniflare';
-import {weatherTile} from '../src/server/weather-grid';
+import {weatherTile,weatherGrid} from '../src/server/weather-grid';
 import {weatherData,weatherPoint,WeatherLimit} from '../src/server/weather-access';
+test('point air temperature bypasses cached lapse-rate artifacts and reports sea-level pressure',async()=>{
+  const mf=new Miniflare({modules:true,script:'export default {fetch(){return new Response("ok")}}',compatibilityDate:'2025-04-01',d1Databases:['DB']});
+  const original=globalThis.fetch;let calls=0;
+  try{
+    const db=await mf.getD1Database('DB');for(const sql of readFileSync('migrations/0001_weather_cache.sql','utf8').split(';').filter(s=>s.trim()))await db.prepare(sql).run();
+    await weatherData(db,'point:31.79:89.12',1,1800,async()=>({current:{temperature_2m:-27.8}}));
+    globalThis.fetch=async(input)=>{
+      calls++;const url=new URL(String(input));assert.equal(url.searchParams.get('elevation'),'nan');assert.equal(url.searchParams.get('cell_selection'),'nearest');
+      assert.ok(url.searchParams.get('current')!.includes('pressure_msl'));assert.ok(!url.searchParams.get('current')!.includes('surface_pressure'));
+      return Response.json({latitude:31.8102,longitude:89.1346,current:{time:'2026-11-03T09:00',temperature_2m:1.8,pressure_msl:1018.7},current_units:{temperature_2m:'°C',pressure_msl:'hPa'}});
+    };
+    const request=new Request('https://ionize.club/api/globe/point?v=2&lat=31.7873&lon=89.1181');
+    const result=await (await weatherPoint(request,db,'a')).json();assert.equal(result.current.temperature_2m,1.8);assert.equal(result.temperatureKind,'air_2m');assert.equal(result.downscaling,'disabled');
+    await weatherPoint(request,db,'b');assert.equal(calls,1);
+  }finally{globalThis.fetch=original;await mf.dispose();}
+});
 test('weather cache shares results, coalesces misses, and enforces a global hourly budget',async()=>{
   const mf=new Miniflare({modules:true,script:'export default {fetch(){return new Response("ok")}}',compatibilityDate:'2025-04-01',d1Databases:['DB']});
   try {
@@ -33,7 +49,7 @@ test('regional endpoint batches 25 WGS84 locations, shares cache and labels a bo
       calls++;const url=new URL(String(input));assert.equal(url.hostname,'api.open-meteo.com');
       const lat=url.searchParams.get('latitude')!.split(',').map(Number),lon=url.searchParams.get('longitude')!.split(',').map(Number);
       assert.equal(lat.length,25);assert.equal(lat[0],1);assert.equal(lon[0],103);assert.equal(lat[24],2);assert.equal(lon[24],104);
-      assert.equal(url.searchParams.get('cell_selection'),'nearest');assert.equal(url.searchParams.get('elevation'),'nan','lake cells must not receive a second lapse-rate correction');
+      assert.equal(url.searchParams.get('cell_selection'),'nearest');assert.deepEqual(url.searchParams.get('elevation')!.split(','),Array(25).fill('nan'),'each coordinate needs its own disabled-downscaling value');
       return Response.json(lat.map(()=>({current:{time:'2026-11-03T08:00',temperature_2m:28,wind_speed_10m:2,wind_direction_10m:359}})));
     };
     const request=new Request('https://ionize.club/api/globe/tile?level=4&x=283&y=91');
