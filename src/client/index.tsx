@@ -1,6 +1,6 @@
 import "./styles.css";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import usePartySocket from "partysocket/react";
 import type { LegacyRef } from "react";
@@ -17,6 +17,7 @@ import {
   type StarlinkTlePair,
 } from "./globe-three";
 
+const Explorer = lazy(() => import('./explorer'));
 type MarketQuote = {
   symbol: string;
   yahoo: string;
@@ -362,6 +363,14 @@ function App() {
       return "rotate";
     }
   });
+  const [globeUser, setGlobeUser] = useState<{email:string}|null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  useEffect(() => {
+    let active=true;
+    const check=async()=>{try{const res=await fetch('/api/globe/me',{cache:'no-store'});if(!res.ok)throw Error();const data=await res.json();if(active){setGlobeUser(data.user);setAuthChecked(true);if(!data.user)setInteractionMode('rotate');else if(new URLSearchParams(location.search).get('explore')==='1'){setInteractionMode('drag');history.replaceState(null,'',location.pathname);}}}catch{if(active){setGlobeUser(null);setAuthChecked(true);setInteractionMode('rotate');}}};
+    void check();const timer=setInterval(check,60000);const focus=()=>void check();window.addEventListener('focus',focus);
+    return()=>{active=false;clearInterval(timer);window.removeEventListener('focus',focus);};
+  },[]);
   const interactionModeRef = useRef(interactionMode);
   useEffect(() => {
     interactionModeRef.current = interactionMode;
@@ -485,6 +494,7 @@ function App() {
       getDayBrightness: () => dayBrightnessRef.current,
       getSunLighting: () => sunLightingRef.current,
       getInteractionMode: () => interactionModeRef.current,
+      getPaused: () => interactionModeRef.current === "drag",
     });
     globeApiRef.current = globe;
     // no cleanup destroy — pagehide below
@@ -901,15 +911,16 @@ function App() {
             {/* Zoom scales three.js Earth + Fresnel atmosphere together */}
             <div
               className="globe-scene"
-              style={{ transform: `scale(${zoom})` }}
+              style={{ transform: `scale(${zoom})`, visibility: interactionMode === 'drag' && globeUser ? 'hidden' : 'visible' }}
             >
               <canvas
                 ref={canvasRef as LegacyRef<HTMLCanvasElement>}
                 className="globe-canvas"
               />
             </div>
+            {interactionMode === 'drag' && globeUser && <Suspense fallback={<div className="explorer-loading">加载探索模式…</div>}><Explorer onExpired={()=>{setGlobeUser(null);setInteractionMode('rotate');}}/></Suspense>}
           </div>
-          <div className="globe-legend" aria-hidden>
+          <div className="globe-legend" aria-hidden style={{visibility:interactionMode === 'drag' && globeUser ? 'hidden':'visible'}}>
             <span className="legend-dot iss" /> ISS
             <span className="legend-dot visitor" /> visitors
             <span className="legend-dot starlink" /> Starlink
@@ -930,18 +941,21 @@ function App() {
                 <button
                   type="button"
                   className={interactionMode === "drag" ? "seg active" : "seg"}
-                  onClick={() => setInteractionMode("drag")}
+                  onClick={() => globeUser ? setInteractionMode('drag') : location.assign('/auth/login')}
+                  disabled={!authChecked}
                 >
-                  拖拽
+                  {globeUser ? '自由探索' : '登录后探索'}
                 </button>
               </div>
               <p className="cloud-status" style={{ opacity: 0.75 }}>
                 {interactionMode === "drag"
-                  ? "拖拽旋转地球 · 松手有惯性 · 自转暂停"
+                  ? "拖拽平移 · 滚轮或双指缩放至地面 · 天气图层"
                   : "自动缓转 · 可调速度"}
               </p>
             </div>
             <div className="control-block">
+              <span className="cloud-status">{globeUser ? globeUser.email : '使用 IONACS 邮箱账户登录后开启卫星探索'}</span>
+              {globeUser && <button type="button" className="seg" onClick={async()=>{const r=await fetch('/api/globe/logout',{method:'POST'});if(r.ok){setGlobeUser(null);setInteractionMode('rotate');}}}>退出探索登录</button>}
               <label htmlFor="speedRange">
                 Rotation <b>{rotationSpeed.toFixed(3)}</b>
               </label>
@@ -1012,11 +1026,12 @@ function App() {
               </div>
               <div className="segmented sun-modes" role="group" aria-label="太阳照明模式">
                 <button type="button" className={sunMode === "photo" ? "seg active" : "seg"} aria-pressed={sunMode === "photo"} onClick={() => setSunMode("photo")}>摄影布光</button>
-                <button type="button" className={sunMode === "live" ? "seg active" : "seg"} aria-pressed={sunMode === "live"} onClick={() => setSunMode("live")}>真实太阳</button>
+                <button type="button" className={sunMode === "live" ? "seg active" : "seg"} aria-pressed={sunMode === "live"} onClick={() => setSunMode("live")}>真实倾角 / 当前日照</button>
               </div>
               <input id="sunAzimuthRange" type="range" min={-180} max={180} step={1} value={sunAzimuth} disabled={sunMode === "live"} aria-describedby="sunLightingHint" aria-valuetext={`${sunAzimuth}度，${Math.abs(sunAzimuth) < 15 ? "正面全亮" : Math.abs(sunAzimuth) > 165 ? "背光" : "侧光"}`} onChange={(e) => setSunAzimuth(Number(e.target.value))} />
               <div className="sun-range-labels" aria-hidden="true"><span>−180° 背光</span><span>0° 全亮</span><span>+180° 背光</span></div>
-              <p id="sunLightingHint" className="cloud-status">{sunMode === "photo" ? "相对当前视角布光 · ±90° 侧光 · 不代表实际昼夜" : "按当前时间计算太阳方向 · 复位可返回正面全亮"}</p>
+              {sunMode === "live" && <p className="cloud-status">{now.toISOString().replace("T"," ").slice(0,19)} UTC · 青线为地轴</p>}
+              <p id="sunLightingHint" className="cloud-status">{sunMode === "photo" ? "相对当前视角布光 · ±90° 侧光 · 不代表实际昼夜" : "地轴约 23.44° · 明暗对应当前地理昼夜 · 自转仅改变观察视角"}</p>
             </div>
             <div className="control-block">
               <label htmlFor="dayBrightRange">
@@ -1188,7 +1203,7 @@ function App() {
         <span>
           Powered by <a href="https://threejs.org/">three.js</a>,{" "}
           <a href="https://npmjs.com/package/partyserver/">PartyServer</a>, Celestrak TLE (ISS + Starlink),
-          Open-Meteo, WhereTheISS.at & Yahoo Finance · Earth: NASA Blue Marble · clouds: animated webgl-earth / near-realtime NASA GIBS true-color → cloud mask
+          Open-Meteo, WhereTheISS.at & Yahoo Finance · Earth: NASA Blue Marble · clouds: animated webgl-earth / EUMETSAT Live Cloud Maps
         </span>
       </footer>
     </div>

@@ -4,7 +4,9 @@
   "name": "multiplayer-globe-template-preview",
   "migrations": [
     {
-      "new_sqlite_classes": ["Globe"],
+      "new_sqlite_classes": [
+        "Globe"
+      ],
       "tag": "v1"
     }
   ],
@@ -12,7 +14,7 @@
     "directory": "public"
   },
   "build": {
-    "command": "npx esbuild src/client/index.tsx --bundle --outdir=public/dist --format=esm --minify --target=es2022"
+    "command": "node scripts/build.mjs"
   },
   "durable_objects": {
     "bindings": [
@@ -26,5 +28,12 @@
     "enabled": true
   },
   "workers_dev": true,
-  "preview_urls": true
+  "preview_urls": true,
+  "d1_databases": [
+    {
+      "binding": "MAIL_DB",
+      "database_name": "globe-auth-local",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ]
 }

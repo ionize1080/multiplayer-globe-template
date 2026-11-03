@@ -1,4 +1,6 @@
 import { cloudWidth, cloudMetadata, cloudTexture } from "./clouds";
+import { authRoute, globeUser } from './globe-auth';
+import { weatherGrid } from './weather-grid';
 import { routePartykitRequest, Server } from "partyserver";
 
 import type { OutgoingMessage, Position } from "../shared";
@@ -624,6 +626,15 @@ async function getStarlinkCatalog(origin?: string): Promise<StarlinkPayload> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if(url.pathname.startsWith('/auth/')||url.pathname.startsWith('/api/globe/')) {
+      try {
+        const auth=await authRoute(request,env.MAIL_DB);
+        if(auth)return auth;
+        if(!await globeUser(request,env.MAIL_DB))return Response.json({error:'请先使用 IONACS 邮箱登录'},{status:401,headers:{'Cache-Control':'no-store'}});
+        if(request.method==='GET'&&url.pathname==='/api/globe/weather')return await weatherGrid(request);
+        if(request.method==='GET'&&url.pathname==='/api/globe/clouds')return Response.json(await cloudMetadata(4096),{headers:{'Cache-Control':'private, max-age=300'}});
+      } catch { return Response.json({error:'服务暂不可用，请稍后重试'},{status:503,headers:{'Cache-Control':'no-store'}}); }
+    }
 
     if (request.method === "GET" && url.pathname === "/api/location") {
       const cf = request.cf as Record<string, string | undefined>;

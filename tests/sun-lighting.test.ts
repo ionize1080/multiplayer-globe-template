@@ -43,3 +43,18 @@ test("angle limits and invalid values never produce a broken light vector", () =
     assert.deepEqual(photoSunDirection(value, 0, out).toArray(), [0, 0, 1]);
   }
 });
+import { sunDirModel } from '../src/client/sun-lighting';
+import { Euler, Quaternion } from 'three';
+
+test('real sunlight follows geographic coordinates through display rotation and axial tilt',()=>{
+  const june=sunDirModel(new Date('2026-06-21T12:00:00Z'));
+  const december=sunDirModel(new Date('2026-12-21T12:00:00Z'));
+  assert.ok(Math.abs(Math.asin(june.y)*180/Math.PI-23.44)<.2);
+  assert.ok(Math.abs(Math.asin(december.y)*180/Math.PI+23.44)<.2);
+  assert.ok(june.x>.9,'Greenwich near solar noon');
+  const midnight=sunDirModel(new Date('2026-06-21T00:00:00Z'));
+  assert.ok(midnight.x<-.9,'Greenwich near midnight');
+  const q=new Quaternion().setFromEuler(new Euler(0,1.8,23.439*Math.PI/180));
+  const normal=new Vector3(.5,.6,.7).normalize();
+  assert.ok(Math.abs(normal.dot(june)-normal.clone().applyQuaternion(q).dot(june.clone().applyQuaternion(q)))<1e-12,'view rotation cannot move daylight to a different country');
+});

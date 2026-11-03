@@ -4,7 +4,7 @@ import { normalizeCloudRows } from "./cloud-mask";
 import { sampleOrbit } from "./orbit-sampler";
 import { OrbitInterpolator } from "./orbit-interpolation";
 import { createIssModel } from "./iss-model";
-import { photoSunDirection, type SunLighting } from "./sun-lighting";
+import { sunDirModel, photoSunDirection, type SunLighting } from "./sun-lighting";
 
 export type LatLngMarker = {
   id: string;
@@ -48,6 +48,7 @@ type GlobeThreeOptions = {
   getSunLighting?: () => SunLighting;
   /** "rotate" = auto-spin; "drag" = pointer orbit (mutually exclusive) */
   getInteractionMode?: () => "rotate" | "drag";
+  getPaused?: () => boolean;
 };
 
 export type StarlinkTlePair = [string, string];
@@ -166,26 +167,6 @@ function latLngAltToVec3(lat: number, lng: number, altKm: number, target = new T
 }
 
 /** ECEF sun unit vector → our globe axes (x=lon0, y=north, z=-lon90). */
-function sunDirModel(date: Date, out = new THREE.Vector3()) {
-  const jd = date.getTime() / 86400000 + 2440587.5;
-  const n = jd - 2451545.0;
-  const L = ((((280.460 + 0.9856474 * n) % 360) + 360) % 360) * (Math.PI / 180);
-  const g = ((((357.528 + 0.9856003 * n) % 360) + 360) % 360) * (Math.PI / 180);
-  const lambda = L + (1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * (Math.PI / 180);
-  const epsilon = (23.439 - 0.0000004 * n) * (Math.PI / 180);
-  const cosEps = Math.cos(epsilon);
-  const sinEps = Math.sin(epsilon);
-  const cosL = Math.cos(lambda);
-  const sinL = Math.sin(lambda);
-  const alpha = Math.atan2(cosEps * sinL, cosL);
-  const delta = Math.asin(sinEps * sinL);
-  const gmst = satellite.gstime(date);
-  const cosd = Math.cos(delta);
-  const x = cosd * Math.cos(alpha - gmst);
-  const y = cosd * Math.sin(alpha - gmst);
-  const z = Math.sin(delta);
-  return out.set(x, z, -y).normalize();
-}
 
 /** Subsolar longitude (rad, -π..π) from globe-axis sun vector (x=lon0, z=-lon90). */
 function sunLongitudeRad(sun: THREE.Vector3): number {
@@ -317,6 +298,9 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   // Pivot: Earth rotates under a *world-fixed* sun (terminator stays real)
   const root = new THREE.Group();
   scene.add(root);
+  const axisGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,-1.35,0),new THREE.Vector3(0,1.35,0)]);
+  const axis = new THREE.Line(axisGeo,new THREE.LineBasicMaterial({color:0x67e8f9,transparent:true,opacity:.65}));
+  root.add(axis);
 
   // --- Lighting: soft night ambient + strong sun (Google Earth–like day) ---
   const ambient = new THREE.AmbientLight(0x7a90b0, 0.48);
@@ -1271,10 +1255,11 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     sunDirModel(date, astronomicalSun);
     initializeView(astronomicalSun);
     const lighting = opts.getSunLighting?.() ?? { mode: "photo", azimuth: 0 };
+    axis.visible = lighting.mode === "live";
     if (lighting.mode === "photo") {
       photoSunDirection(lighting.azimuth, camYaw, liveSun);
     } else {
-      liveSun.copy(astronomicalSun);
+      liveSun.copy(astronomicalSun).applyQuaternion(root.quaternion);
     }
     sunDir.copy(liveSun);
     dayNightUniforms.uSunDir.value.copy(liveSun);
@@ -1555,6 +1540,7 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
   function frame(time: number) {
     if (!running) return;
     raf = requestAnimationFrame(frame);
+    if (opts.getPaused?.() || document.hidden) return;
 
     const mode = opts.getInteractionMode?.() ?? "rotate";
     if (mode !== interactionMode) applyInteractionMode(mode);
@@ -1562,6 +1548,25 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     const showIss = opts.getShowIss?.() ?? true;
     const showStarlink = opts.getShowStarlink?.() ?? false;
     if (showStarlink) applyStarlinkVisuals();
+
+    if (interactionMode === "drag") {
+      if (dragPointerId == null) {
+        viewTheta += dragVelY;
+        viewPhi = Math.min(DRAG_PHI_MAX, Math.max(DRAG_PHI_MIN, viewPhi + dragVelX));
+        dragVelY *= DRAG_INERTIA;
+        dragVelX *= DRAG_INERTIA;
+        if (Math.abs(dragVelY) < 1e-5) dragVelY = 0;
+        if (Math.abs(dragVelX) < 1e-5) dragVelX = 0;
+      }
+    } else {
+      viewTheta += opts.getRotationSpeed();
+      // Softly ease tilt toward default — never hard-reset yaw (Alan R2 snap-back fix)
+      viewPhi += (ROTATE_PHI - viewPhi) * 0.04;
+    }
+    root.rotation.y = viewTheta;
+    root.rotation.x = opts.getSunLighting?.().mode === "live" ? 0 : viewPhi;
+    root.rotation.z = opts.getSunLighting?.().mode === "live" ? THREE.MathUtils.degToRad(23.439) : 0;
+    root.updateMatrixWorld(true);
 
     const now = new Date();
     updateSun(now);
@@ -1680,22 +1685,6 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     cloudShadow.rotation.y = clouds.rotation.y;
     cloudShadow.rotation.z = clouds.rotation.z;
 
-    if (interactionMode === "drag") {
-      if (dragPointerId == null) {
-        viewTheta += dragVelY;
-        viewPhi = Math.min(DRAG_PHI_MAX, Math.max(DRAG_PHI_MIN, viewPhi + dragVelX));
-        dragVelY *= DRAG_INERTIA;
-        dragVelX *= DRAG_INERTIA;
-        if (Math.abs(dragVelY) < 1e-5) dragVelY = 0;
-        if (Math.abs(dragVelX) < 1e-5) dragVelX = 0;
-      }
-    } else {
-      viewTheta += opts.getRotationSpeed();
-      // Softly ease tilt toward default — never hard-reset yaw (Alan R2 snap-back fix)
-      viewPhi += (ROTATE_PHI - viewPhi) * 0.04;
-    }
-    root.rotation.y = viewTheta;
-    root.rotation.x = viewPhi;
     phi = viewTheta;
     // Drag mode: persist often so remount restores latest tilt (E3 ~33s snap-back)
     const persistEvery = interactionMode === "drag" ? 50 : 250;
@@ -1744,6 +1733,8 @@ export function createGlobeThree(opts: GlobeThreeOptions) {
     orbitGeo.dispose();
     orbitGlowGeo.dispose();
     earthGeo.dispose();
+    axisGeo.dispose();
+    axis.material.dispose();
     earthMat.dispose();
     waterMask?.dispose();
     emptyWaterMask.dispose();

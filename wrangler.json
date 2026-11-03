@@ -4,7 +4,9 @@
   "name": "multiplayer-globe-template",
   "migrations": [
     {
-      "new_sqlite_classes": ["Globe"],
+      "new_sqlite_classes": [
+        "Globe"
+      ],
       "tag": "v1"
     }
   ],
@@ -12,7 +14,7 @@
     "directory": "public"
   },
   "build": {
-    "command": "npx esbuild src/client/index.tsx --bundle --outdir=public/dist --format=esm --minify --target=es2022"
+    "command": "node scripts/build.mjs"
   },
   "durable_objects": {
     "bindings": [
@@ -25,5 +27,12 @@
   "observability": {
     "enabled": true
   },
-  "upload_source_maps": true
+  "upload_source_maps": true,
+  "d1_databases": [
+    {
+      "binding": "MAIL_DB",
+      "database_name": "maildata",
+      "database_id": "51d8c8f2-6139-4a6c-ad85-40668d0c45d2"
+    }
+  ]
 }
