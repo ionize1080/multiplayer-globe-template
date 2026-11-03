@@ -1,3 +1,4 @@
+import {pointLocation} from './location-details';
 import { searchPlaces } from './place-search';
 import { cityWeather } from './weather-cities';
 import { weatherPoint, WeatherLimit } from './weather-access';
@@ -637,6 +638,7 @@ export default {
         const user=await globeUser(request,env.MAIL_DB);
         if(!user)return Response.json({error:'请先使用 IONACS 邮箱登录'},{status:401,headers:{'Cache-Control':'no-store'}});
         if(request.method==='GET'&&url.pathname.startsWith('/api/globe/terrain/'))return await terrainTile(request);
+        if(request.method==='GET'&&url.pathname==='/api/globe/location')return await pointLocation(request,env.MAIL_DB,await digest(user.email));
         if(request.method==='GET'&&url.pathname==='/api/globe/search')return await searchPlaces(request,env.MAIL_DB,await digest(user.email));
         if(request.method==='GET'&&url.pathname==='/api/globe/cities')return await cityWeather(env.MAIL_DB);
         if(request.method==='GET'&&url.pathname==='/api/globe/weather')return await weatherGrid(request,env.MAIL_DB);

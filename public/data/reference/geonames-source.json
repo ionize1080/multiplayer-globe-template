@@ -1,0 +1,8 @@
+{
+  "source": "GeoNames cities15000",
+  "url": "https://download.geonames.org/export/dump/cities15000.zip",
+  "license": "CC BY 4.0",
+  "date": "2026-11-03",
+  "sha256": "f3bce12026e673fbef0833cd7fe1960009c90576a45ac208e73544e16d5bfbc5",
+  "added": 28135
+}

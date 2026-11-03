@@ -8,3 +8,10 @@ export function cityReferenceKeys(bounds:Bounds){
  return [...keys];
 }
 export function mergeCityPlaces(major:CityPlace[],regional:CityPlace[]){const seen=new Set<string>();return [...major,...regional].filter(p=>{if(p.kind&&p.kind!=='city')return false;const key=`${p.name}/${p.lat.toFixed(1)}/${p.lon.toFixed(1)}`;if(seen.has(key))return false;seen.add(key);return true;}).sort((a,b)=>a.rank-b.rank);}
+
+export type PlaceDensity='major'|'standard'|'detailed';
+export function cityDisplayPolicy(density:PlaceDensity,height:number){
+ if(density==='major')return {maxRank:3,gapX:55,gapY:48,limit:60};
+ if(density==='detailed')return {maxRank:height>5000000?5:height>2000000?8:20,gapX:8,gapY:31,limit:180};
+ return {maxRank:height>2000000?3:height>600000?7:20,gapX:35,gapY:45,limit:100};
+}

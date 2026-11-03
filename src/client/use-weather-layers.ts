@@ -1,3 +1,4 @@
+import {visibleRectangle} from './visible-rectangle';
 import type {WeatherField} from './weather-palettes';
 import {useEffect,useRef,useState,type RefObject,type MutableRefObject} from 'react';
 import type {Viewer,ImageryLayer} from 'cesium';
@@ -41,7 +42,7 @@ export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperat
     };
     async function update(id:number){
       const C=await import('cesium');if(stopped||id!==sequence||v!.isDestroyed())return;
-      const rectangle=v!.camera.computeViewRectangle();
+      const rectangle=visibleRectangle(v!,C);
       const bounds:Bounds=rectangle?{west:C.Math.toDegrees(rectangle.west),east:C.Math.toDegrees(rectangle.east),south:C.Math.toDegrees(rectangle.south),north:C.Math.toDegrees(rectangle.north)}:{west:-180,east:180,south:-90,north:90};
       const plan=planWeatherTiles(bounds),drawingBounds=plan.length?bounds:{west:-180,east:180,south:-90,north:90};
       let warning='';setNote(plan.length?`正在加载视野细网格 · ${plan[0].resolution}° 显示采样`:'正在加载全球概览…');

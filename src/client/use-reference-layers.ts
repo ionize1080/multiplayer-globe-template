@@ -1,3 +1,4 @@
+import {visibleRectangle} from './visible-rectangle';
 import {useEffect,useRef,useState,type RefObject} from 'react';
 import type {Viewer,DataSource} from 'cesium';
 type Place={lon:number;lat:number;name:string;rank:number;kind?:string};
@@ -36,7 +37,7 @@ export function useReferenceLayers(viewer:RefObject<Viewer>,ready:boolean,bounda
         for(const entity of entities){
           entity.show=false;const rank=Number(entity.properties?.rank?.getValue()??6);
           if(height>1500000&&rank>3||height>400000&&rank>5)continue;
-          const point=entity.position?.getValue(v!.clock.currentTime);if(!point||!occluder.isPointVisible(point))continue;
+          const point=entity.position?.getValue(v!.clock.currentTime);if(!point||(v!.scene.mode===C.SceneMode.SCENE3D&&!occluder.isPointVisible(point)))continue;
           const screen=C.SceneTransforms.worldToWindowCoordinates(v!.scene,point);if(!screen)continue;
           const text=String(entity.label?.text?.getValue()||''),w=Math.max(35,text.length*11),box={x:screen.x-w/2,y:screen.y-18,w,h:22};
           if(seen.has(text)||box.x<0||box.y<0||box.x+w>v!.scene.canvas.clientWidth||box.y+box.h>v!.scene.canvas.clientHeight)continue;
@@ -46,7 +47,7 @@ export function useReferenceLayers(viewer:RefObject<Viewer>,ready:boolean,bounda
       };
       refreshLabels=layout;
       try{
-        const rect=v!.camera.computeViewRectangle(),height=v!.camera.positionCartographic.height,keys:string[]=[];
+        const rect=visibleRectangle(v!,C),height=v!.camera.positionCartographic.height,keys:string[]=[];
         if((boundaries||labels)&&rect&&height<3000000){
           if(!manifest.current)manifest.current=new Set((await json<{tiles:string[]}>('/data/reference/index.json')).tiles);
           const west=C.Math.toDegrees(rect.west),east=C.Math.toDegrees(rect.east)+(rect.east<rect.west?360:0),south=C.Math.toDegrees(rect.south),north=C.Math.toDegrees(rect.north);
@@ -72,7 +73,7 @@ export function useReferenceLayers(viewer:RefObject<Viewer>,ready:boolean,bounda
         }
         if(!active())return;
         for(const [key,data] of chunks.current){if(chunks.current.size<=Math.max(8,keys.length))break;if(visible.current.has(key))continue;if(data.lines)v!.dataSources.remove(data.lines,true);if(data.labels)v!.dataSources.remove(data.labels,true);chunks.current.delete(key);}
-        sync();layout();setNote(keys.length?'Natural Earth · 1:1000万参考界线 / 省州 / 城市':'Natural Earth · 全球参考界线 / 主要城市');v!.scene.requestRender();
+        sync();layout();setNote(keys.length?'Natural Earth / GeoNames · 1:1000万参考界线 / 省州 / 城市':'Natural Earth / GeoNames · 全球参考界线 / 主要城市');v!.scene.requestRender();
       }catch{if(active())setNote('部分地理数据暂不可用，已加载图层保留');}
     }
     function schedule(delay=150){const id=++sequence;clearTimeout(timer);timer=setTimeout(()=>void update(id),delay);}
