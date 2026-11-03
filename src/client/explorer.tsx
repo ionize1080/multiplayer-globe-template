@@ -116,7 +116,7 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
       <p className="layer-hint">各层可同时开启 · 再点“图层”收起</p>
       </div></details>
       <select aria-label="地图底图" value={baseMap} onChange={e=>setBaseMap(e.target.value as 'satellite'|'map')}><option value="satellite">卫星影像</option><option value="map">简洁地图</option></select>
-      <button aria-pressed={flat} onClick={()=>{const v=viewer.current;if(!v)return;if(flat)v.scene.morphTo3D(.8);else v.scene.morphTo2D(.8);setFlat(!flat);}}>{flat?'3D 地球':'2D 地图'}</button>
+      <button aria-pressed={flat} onClick={()=>{void import('cesium').then(C=>{const v=viewer.current;if(!v)return;const p=v.camera.positionCartographic;const destination=C.Cartesian3.fromRadians(p.longitude,p.latitude,p.height);const remove=v.scene.morphComplete.addEventListener(()=>{remove();if(!v.isDestroyed()){v.camera.setView({destination});v.scene.requestRender();}});if(flat)v.scene.morphTo3D(.8);else v.scene.morphTo2D(.8);setFlat(!flat);});}}>{flat?'3D 地球':'2D 地图'}</button>
       <button onClick={()=>void zoom(.5)} aria-label="放大">＋</button><button onClick={()=>void zoom(2)} aria-label="缩小">－</button>
       <button onClick={()=>{void import('cesium').then(C=>viewer.current?.camera.flyTo({destination:C.Cartesian3.fromDegrees(103.82,1.35,21000000),duration:1.5}));}}>全球</button>
     </div>
