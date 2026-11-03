@@ -30,3 +30,13 @@ export function terrainColor(h:number):number[]{
   for(let i=1;i<stops.length;i++){const a=stops[i-1],b=stops[i];if(h<=b[0]){const t=Math.max(0,(h-a[0])/(b[0]-a[0]));return [1,2,3].map(k=>a[k]+(b[k]-a[k])*t);}}
   return stops.at(-1)!.slice(1);
 }
+// Start at the visible region's LOD instead of downloading every global ancestor.
+export function terrainViewPlan(bounds:{west:number;east:number;south:number;north:number}){
+ const {west,east,south,north}=bounds;
+ const global={key:'world',minimumLevel:0,west:-180,east:180,south:-MERCATOR_LIMIT,north:MERCATOR_LIMIT};
+ if(![west,east,south,north].every(Number.isFinite)||east<=west||north<=south||south>=MERCATOR_LIMIT||north<=-MERCATOR_LIMIT||east-west>100||north-south>80)return global;
+ const dx=(east-west)*.15,dy=(north-south)*.15;
+ const a={lon:Math.max(-180,west-dx),lat:Math.min(MERCATOR_LIMIT,north+dy)},b={lon:Math.min(180-1e-9,east+dx),lat:Math.max(-MERCATOR_LIMIT,south-dy)};
+ for(let z=12;z>=0;z--){const nw=terrainPosition(a.lat,a.lon,z)!,se=terrainPosition(b.lat,b.lon,z)!;const left=Math.floor(nw.x),right=Math.floor(se.x),top=Math.floor(nw.y),bottom=Math.floor(se.y);if((right-left+1)*(bottom-top+1)>4)continue;const n=2**z,latitude=(y:number)=>Math.atan(Math.sinh(Math.PI*(1-2*y/n)))*180/Math.PI;return {key:`${z}/${left}/${top}/${right}/${bottom}`,minimumLevel:z,west:left/n*360-180,east:(right+1)/n*360-180,north:latitude(top),south:latitude(bottom+1)};}
+ return global;
+}

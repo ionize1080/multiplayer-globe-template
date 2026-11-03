@@ -30,3 +30,15 @@ const naturalPlaces:[string,string[],number,number][]=[
  ['南海',['南海','south china sea'],14,114]
 ];
 export function naturalPlace(query:string):PlaceResult|null{const q=normalizeQuery(query),p=naturalPlaces.find(p=>p[1].includes(q));return p?{id:'natural:'+p[1][1],name:p[0],detail:p[1][1]+' · 大型自然地理区域参考位置',lat:p[2],lon:p[3],kind:'ocean'}:null;}
+// Query aliases broaden recall, without applying a user's current country as a bias.
+const overseasAliases:Record<string,string>={
+ '华盛顿':'Washington','華盛頓':'Washington','华盛顿特区':'Washington DC','華盛頓特區':'Washington DC','美国华盛顿':'Washington DC','華盛頓州':'Washington','华盛顿州':'Washington',
+ '纽约':'New York','紐約':'New York','洛杉矶':'Los Angeles','洛杉磯':'Los Angeles','旧金山':'San Francisco','舊金山':'San Francisco','伦敦':'London','倫敦':'London','巴黎':'Paris','柏林':'Berlin','东京':'Tokyo','東京':'Tokyo','大阪':'Osaka','悉尼':'Sydney','墨尔本':'Melbourne','墨爾本':'Melbourne','温哥华':'Vancouver','溫哥華':'Vancouver','多伦多':'Toronto','多倫多':'Toronto','新加坡':'Singapore','首尔':'Seoul','首爾':'Seoul','汉堡':'Hamburg','漢堡':'Hamburg','罗马':'Rome','羅馬':'Rome','慕尼黑':'Munich','布拉格':'Prague','维也纳':'Vienna','維也納':'Vienna'};
+export function searchQueries(query:string){const q=normalizeQuery(query);return overseasAliases[q]?[overseasAliases[q],q]:[q];}
+export function mergeSearchResults(groups:PlaceResult[][]){const seen=new Set<string>();return groups.flat().filter(p=>{if(seen.has(p.id))return false;seen.add(p.id);return true;}).slice(0,12);}
+export function clarifyWashington(results:PlaceResult[],query:string){
+ if(!/华盛顿|華盛頓|washington/i.test(query))return results;
+ const rows=results.map(p=>{if(!/^washington$/i.test(p.name))return p;if(p.kind==='state'&&p.lat>45&&p.lat<50&&p.lon>-125&&p.lon<-116)return {...p,name:'华盛顿州 · Washington State'};if(Math.abs(p.lat-38.8951)<.3&&Math.abs(p.lon+77.0364)<.3)return {...p,name:'华盛顿特区 · Washington, D.C.'};return p;});
+ const state=/州|state/i.test(query);const rank=(p:PlaceResult)=>p.name.startsWith(state?'华盛顿州':'华盛顿特区')?0:p.name.startsWith('华盛顿')&&p.lon<0?1:2;
+ return rows.sort((a,b)=>rank(a)-rank(b));
+}

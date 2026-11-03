@@ -4,13 +4,14 @@ import type {Viewer,ImageryLayer} from 'cesium';
 import {planWeatherTiles,type Bounds,type WeatherGrid,type WeatherTile} from '../weather-tiles';
 import {drawWeather} from './weather-render';
 
-export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperature:boolean,wind:boolean,opacity:MutableRefObject<number>,colorLayer:MutableRefObject<ImageryLayer|null>,windLayer:MutableRefObject<ImageryLayer|null>,restack:()=>void,onExpired:()=>void,field:WeatherField='temperature'){
+export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperature:boolean,wind:boolean,opacity:MutableRefObject<number>,colorLayer:MutableRefObject<ImageryLayer|null>,windLayer:MutableRefObject<ImageryLayer|null>,restack:()=>void,onExpired:()=>void,field:WeatherField='temperature',citiesEnabled=false){
   const [note,setNote]=useState('');
+  const [samples,setSamples]=useState<{global:WeatherGrid|null;tiles:WeatherTile[]}>({global:null,tiles:[]});
   const global=useRef<WeatherGrid|null>(null),tiles=useRef(new Map<string,WeatherTile>());
   const pending=useRef(new Map<string,Promise<WeatherTile>>()),globalPending=useRef<Promise<WeatherGrid>|null>(null);
   const cooldown=useRef(0),lastFetch=useRef(0);
   useEffect(()=>{
-    if(!ready||(!temperature&&!wind))return;
+    if(!ready||(!temperature&&!wind&&!citiesEnabled))return;
     let stopped=false,sequence=0,timer:ReturnType<typeof setTimeout>,removeMove:(()=>void)|undefined,resize:ResizeObserver|undefined;
     const v=viewer.current;if(!v)return;
     const globalData=()=>{
@@ -49,6 +50,8 @@ export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperat
       const cachedTiles=()=>plan.map(t=>tiles.current.get(t.key)).filter((t):t is WeatherTile=>!!t&&Date.now()-Date.parse(t.fetchedAt)<6*3600000);
       async function render(){
         const data=cachedTiles(),canvas=v!.scene.canvas;
+        setSamples({global:global.current,tiles:data});
+        if(!temperature&&!wind)return;
         const width=plan.length?Math.max(512,Math.min(1536,Math.round(canvas.clientWidth*1.5))):1440;
         const height=plan.length?Math.max(384,Math.min(1024,Math.round(canvas.clientHeight*1.5))):720;
         const project=<T extends WeatherGrid>(grid:T):T=>field==='temperature'?grid:{...grid,points:grid.points.map(p=>({...p,temperature:p[field]??null}))};
@@ -76,6 +79,6 @@ export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperat
     removeMove=v.camera.moveEnd.addEventListener(schedule);const removeStart=v.camera.moveStart.addEventListener(()=>{if(windLayer.current)windLayer.current.show=false;});resize=new ResizeObserver(schedule);resize.observe(v.container);
     schedule();const interval=setInterval(schedule,60000);
     return()=>{stopped=true;sequence++;clearTimeout(timer);clearInterval(interval);removeMove?.();removeStart();resize?.disconnect();if(!v.isDestroyed()){if(colorLayer.current)v.imageryLayers.remove(colorLayer.current);if(windLayer.current)v.imageryLayers.remove(windLayer.current);colorLayer.current=null;windLayer.current=null;v.scene.requestRender();}};
-  },[ready,temperature,wind,field]);
-  return note;
+  },[ready,temperature,wind,field,citiesEnabled]);
+  return {note,samples};
 }

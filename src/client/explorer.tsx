@@ -1,3 +1,4 @@
+import {ContourLabels} from './contour-labels';
 import {CityWeather} from './city-weather';
 import {useRadar} from './use-radar';
 import {weatherFields,fieldGradient,type WeatherField} from './weather-palettes';
@@ -53,6 +54,7 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
       const C=await import('cesium');if(cancelled||!container.current)return;
       C.Ion.defaultAccessToken='';
       const v=new C.Viewer(container.current,{baseLayer:false,baseLayerPicker:false,geocoder:false,homeButton:false,sceneModePicker:false,navigationHelpButton:false,animation:false,timeline:false,fullscreenButton:false,infoBox:false,selectionIndicator:false,requestRenderMode:true,maximumRenderTimeChange:Infinity});viewer.current=v;
+      v.useBrowserRecommendedResolution=false;v.resolutionScale=Math.min(2,window.devicePixelRatio||1)/(window.devicePixelRatio||1);
       v.scene.screenSpaceCameraController.minimumZoomDistance=100;
       v.scene.screenSpaceCameraController.maximumZoomDistance=50000000;
       v.scene.globe.maximumScreenSpaceError=2;
@@ -81,7 +83,7 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
     void update();const timer=setInterval(update,15*60000);
     return()=>{cancelled=true;abort.abort();clearInterval(timer);const v=viewer.current;if(v&&cloudLayer.current){v.imageryLayers.remove(cloudLayer.current);cloudLayer.current=null;v.scene.requestRender();}};
   },[ready,clouds]);
-  const note=useWeatherLayers(viewer,ready,temperature,wind,opacityRef,weatherLayer,windLayer,restack,onExpired,field);
+  const {note,samples}=useWeatherLayers(viewer,ready,temperature,wind,opacityRef,weatherLayer,windLayer,restack,onExpired,field,citiesEnabled);
   useEffect(()=>{if(weatherLayer.current)weatherLayer.current.alpha=opacity;viewer.current?.scene.requestRender();},[opacity]);
   useEffect(()=>{if(cloudLayer.current)cloudLayer.current.alpha=cloudStrength;viewer.current?.scene.requestRender();},[cloudStrength]);
   const referenceNote=useReferenceLayers(viewer,ready,boundaries,labels);
@@ -93,7 +95,8 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
   const fields=[['体感温度','apparent_temperature','°C',1],['相对湿度','relative_humidity_2m','%',0],['风速 · 10 m','wind_speed_10m','m/s',1],['风向 · 来向','wind_direction_10m','°',0],['阵风 · 10 m','wind_gusts_10m','m/s',1],['海平面气压','pressure_msl','hPa',1],['降水 · 统计时段','precipitation','mm',1],['总云量','cloud_cover','%',0]] as const;
   return <div className={picked?'explorer explorer--details':'explorer'}><div className="explorer-map">
     <div ref={container} className="explorer-canvas"/>
-    <CityWeather viewer={viewer} ready={ready} enabled={citiesEnabled} onPick={pickCity} onExpired={onExpired}/>
+    <ContourLabels viewer={viewer} renderer={terrain.renderer} enabled={contours} ready={ready}/>
+    <CityWeather samples={samples} viewer={viewer} ready={ready} enabled={citiesEnabled||labels} showTemperature={citiesEnabled} onPick={pickCity} onExpired={onExpired}/>
     <PlaceSearch onExpired={onExpired} onPick={p=>{setPicked(p);setSelected(p.name);void import('cesium').then(C=>{const v=viewer.current;if(!v)return;v.entities.removeById('weather-point');v.entities.add({id:'weather-point',position:C.Cartesian3.fromDegrees(p.lon,p.lat),point:{pixelSize:12,color:C.Color.fromCssColorString('#7dd3fc'),outlineColor:C.Color.WHITE,outlineWidth:2}});const height=p.kind==='country'||p.kind==='ocean'?6000000:p.kind==='state'?2000000:p.kind==='city'?160000:p.kind==='coordinate'?30000:6000;v.camera.cancelFlight();v.camera.flyTo({destination:C.Cartesian3.fromDegrees(p.lon,p.lat,height),duration:1.2});});}}/>
     <nav className="weather-dock" aria-label="天气图层快速切换">{(['temperature','wind','radar','satellite','humidity','pressure','cloud'] as const).map((value,i)=><button key={value} aria-pressed={value==='wind'?wind:value==='radar'?radarEnabled:value==='satellite'?clouds:temperature&&field===value} onClick={()=>choose(value)}><span>{['◉','≋','◌','☁','◒','◎','◐'][i]}</span>{value==='wind'?'风场':value==='radar'?'雷达':value==='satellite'?'卫星云图':weatherFields[value].label}</button>)}</nav>
     {radarEnabled&&<section className="radar-timeline" aria-label="雷达历史回放"><div><button disabled={radar.frames.length<2} onClick={()=>radar.setPlaying(!radar.playing)} aria-label={radar.playing?'暂停雷达回放':'播放雷达历史'}>{radar.playing?'Ⅱ':'▶'}</button><strong>降水雷达</strong><time>{radar.frames[radar.index]?new Date(radar.frames[radar.index].time*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'加载中…'}</time><span>过去 2 小时</span></div><input aria-label="雷达历史时间" type="range" min="0" max={Math.max(0,radar.frames.length-1)} value={radar.index} disabled={!radar.frames.length} onChange={e=>{radar.setPlaying(false);radar.setIndex(+e.target.value);}}/><p>{radar.error||'帧生成时间 · 每 10 分钟一帧 · 回放每 10 秒前进一帧'}<br/>覆盖因地区而异，空白不代表无降水 · <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer ↗</a></p></section>}
