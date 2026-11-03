@@ -1,3 +1,5 @@
+import {useSatellite} from './use-satellite';
+import type {SatelliteMode} from '../satellite';
 import {PointLocation} from './point-location';
 import type {PlaceDensity} from '../city-visibility';
 import {CityWeather} from './city-weather';
@@ -13,17 +15,18 @@ type PointWeather={time:string,sampleLatitude:number,sampleLongitude:number,curr
 export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:()=>void}) {
   const container=useRef<HTMLDivElement>(null), viewer=useRef<Viewer|null>(null);
   const [ready,setReady]=useState(false),[error,setError]=useState(''),[clouds,setClouds]=useState(false),[cloudStrength,setCloudStrength]=useState(.6),[temperature,setTemperature]=useState(true),[wind,setWind]=useState(false),[boundaries,setBoundaries]=useState(true),[labels,setLabels]=useState(false),[opacity,setOpacity]=useState(.78),[cloudNote,setCloudNote]=useState(''),[height,setHeight]=useState(''),[selected,setSelected]=useState('');
-  const [field,setField]=useState<WeatherField>('temperature'),[radarEnabled,setRadarEnabled]=useState(false),[citiesEnabled,setCitiesEnabled]=useState(true),[flat,setFlat]=useState(false),[baseMap,setBaseMap]=useState<'satellite'|'map'>('satellite'),[baseNote,setBaseNote]=useState('');
+  const [field,setField]=useState<WeatherField>('temperature'),[radarEnabled,setRadarEnabled]=useState(false),[citiesEnabled,setCitiesEnabled]=useState(true),[flat,setFlat]=useState(false),[baseMap,setBaseMap]=useState<'satellite'|'map'|'recent'>('satellite'),[baseNote,setBaseNote]=useState('');
   const [placeDensity,setPlaceDensity]=useState<PlaceDensity>(()=>{try{const value=localStorage.getItem('ionize-place-density');if(value==='major'||value==='standard'||value==='detailed')return value;}catch{}return 'detailed';});
   useEffect(()=>{try{localStorage.setItem('ionize-place-density',placeDensity);}catch{}},[placeDensity]);
   const baseLayer=useRef<ImageryLayer|null>(null),baseCache=useRef<Partial<Record<'satellite'|'map',ImageryLayer>>>({});
+  const [satelliteMode,setSatelliteMode]=useState<SatelliteMode>('latest');
   const radar=useRadar(viewer,ready,radarEnabled);
   const choose=(value:WeatherField|'wind'|'radar'|'satellite')=>{setTemperature(value!=='wind'&&value!=='radar'&&value!=='satellite');setWind(value==='wind');setRadarEnabled(value==='radar');setClouds(value==='satellite');if(value!=='wind'&&value!=='radar'&&value!=='satellite')setField(value);};
   const pickCity=(p:{lat:number;lon:number})=>{setPicked(p);void import('cesium').then(C=>{const v=viewer.current;if(!v)return;v.entities.removeById('weather-point');v.entities.add({id:'weather-point',position:C.Cartesian3.fromDegrees(p.lon,p.lat),point:{pixelSize:10,color:C.Color.fromCssColorString('#7dd3fc'),outlineColor:C.Color.WHITE,outlineWidth:2}});v.camera.cancelFlight();v.camera.flyTo({destination:C.Cartesian3.fromDegrees(p.lon,p.lat,Math.min(160000,v.camera.positionCartographic.height)),duration:1});});};
   const windLayer=useRef<ImageryLayer|null>(null),weatherLayer=useRef<ImageryLayer|null>(null),cloudLayer=useRef<ImageryLayer|null>(null);
   const [picked,setPicked]=useState<{lat:number,lon:number}|null>(null),[pointWeather,setPointWeather]=useState<PointWeather|null>(null),[pointError,setPointError]=useState(''),[pointLoading,setPointLoading]=useState(false);
   const [elevation,setElevation]=useState(false),[hillshade,setHillshade]=useState(false),[contours,setContours]=useState(false),[terrainOpacity,setTerrainOpacity]=useState(.75),[pointElevation,setPointElevation]=useState<number|null>(null),[elevationError,setElevationError]=useState('');
-  const weatherEnabled=clouds||temperature||wind||radarEnabled||citiesEnabled,inspectEnabled=weatherEnabled||elevation||hillshade||contours,weatherEnabledRef=useRef(inspectEnabled),pointSequence=useRef(0);
+  const weatherEnabled=clouds||temperature||wind||radarEnabled||citiesEnabled,inspectEnabled=weatherEnabled||elevation||hillshade||contours||baseMap==='recent',weatherEnabledRef=useRef(inspectEnabled),pointSequence=useRef(0);
   weatherEnabledRef.current=inspectEnabled;
   useEffect(()=>{if(!inspectEnabled){setPicked(null);viewer.current?.entities.removeById('weather-point');}},[inspectEnabled]);
   useEffect(()=>{
@@ -78,7 +81,7 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
   },[]);
   useEffect(()=>{
     const v=viewer.current;if(!ready||!v)return;let stopped=false;setBaseNote('');
-    void (async()=>{let layer=baseCache.current[baseMap];if(!layer){const C=await import('cesium');if(stopped||v.isDestroyed())return;const provider=new C.UrlTemplateImageryProvider({url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png',maximumLevel:19,enablePickFeatures:false,credit:new C.Credit('<a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>',true)});provider.errorEvent.addEventListener(()=>{if(!stopped)setBaseNote('部分地图瓦片暂不可用，可切换卫星影像');});layer=v.imageryLayers.addImageryProvider(provider,0);baseCache.current.map=layer;}if(stopped)return;for(const [key,item] of Object.entries(baseCache.current))if(item)item.show=key===baseMap;baseLayer.current=layer;v.imageryLayers.lowerToBottom(layer);v.scene.requestRender();})().catch(()=>{if(!stopped)setBaseNote('底图切换失败，请稍后重试');});return()=>{stopped=true;};
+    void (async()=>{const baseKind=baseMap==='recent'?'satellite':baseMap;let layer=baseCache.current[baseKind];if(!layer){const C=await import('cesium');if(stopped||v.isDestroyed())return;const provider=new C.UrlTemplateImageryProvider({url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png',maximumLevel:19,enablePickFeatures:false,credit:new C.Credit('<a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>',true)});provider.errorEvent.addEventListener(()=>{if(!stopped)setBaseNote('部分地图瓦片暂不可用，可切换卫星影像');});layer=v.imageryLayers.addImageryProvider(provider,0);baseCache.current.map=layer;}if(stopped)return;for(const [key,item] of Object.entries(baseCache.current))if(item){item.show=key===baseKind;item.saturation=baseMap==='recent'?.15:1;item.brightness=baseMap==='recent'?.6:1;}baseLayer.current=layer;v.imageryLayers.lowerToBottom(layer);v.scene.requestRender();})().catch(()=>{if(!stopped)setBaseNote('底图切换失败，请稍后重试');});return()=>{stopped=true;};
   },[ready,baseMap]);
   useEffect(()=>{
     if(!ready||!clouds)return;let cancelled=false;const abort=new AbortController();
@@ -91,6 +94,7 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
   useEffect(()=>{if(cloudLayer.current)cloudLayer.current.alpha=cloudStrength;viewer.current?.scene.requestRender();},[cloudStrength]);
   const referenceNote=useReferenceLayers(viewer,ready,boundaries,labels);
   const terrain=useTerrainLayers(viewer,ready,{elevation,hillshade,contours},terrainOpacity,onExpired,restack);
+  const recent=useSatellite(viewer,ready,baseMap==='recent',satelliteMode,onExpired,restack);
   const zoom=async(factor:number)=>{const C=await import('cesium'),v=viewer.current;if(!v)return;const p=v.camera.positionCartographic;v.camera.flyTo({destination:C.Cartesian3.fromRadians(p.longitude,p.latitude,Math.max(100,Math.min(50000000,p.height*factor))),duration:.45});};
   const metric=(key:string,digits=1)=>{const value=pointWeather?.current[key];return typeof value==='number'&&Number.isFinite(value)?value.toFixed(digits):'—';};
   const closePoint=()=>{setPicked(null);viewer.current?.entities.removeById('weather-point');viewer.current?.scene.requestRender();};
@@ -122,11 +126,12 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
       <p className="layer-hint">详细模式显示更多已有地名，自动避让重叠。</p>
       <p className="layer-hint">各层可同时开启 · 再点“图层”收起</p>
       </div></details>
-      <select aria-label="地图底图" value={baseMap} onChange={e=>setBaseMap(e.target.value as 'satellite'|'map')}><option value="satellite">卫星影像</option><option value="map">简洁地图</option></select>
+      <select aria-label="地图底图" value={baseMap} onChange={e=>{const value=e.target.value as 'satellite'|'map'|'recent';setBaseMap(value);if(value==='recent'){setTemperature(false);setWind(false);setClouds(false);setRadarEnabled(false);}}}><option value="satellite">卫星影像</option><option value="map">简洁地图</option><option value="recent">近期卫星 · CDSE</option></select>
       <button aria-pressed={flat} onClick={()=>{void import('cesium').then(C=>{const v=viewer.current;if(!v)return;const p=v.camera.positionCartographic;const destination=C.Cartesian3.fromRadians(p.longitude,p.latitude,p.height);const remove=v.scene.morphComplete.addEventListener(()=>{remove();if(!v.isDestroyed()){v.camera.setView({destination});v.scene.requestRender();}});if(flat)v.scene.morphTo3D(.8);else v.scene.morphTo2D(.8);setFlat(!flat);});}}>{flat?'3D 地球':'2D 地图'}</button>
       <button onClick={()=>void zoom(.5)} aria-label="放大">＋</button><button onClick={()=>void zoom(2)} aria-label="缩小">－</button>
       <button onClick={()=>{void import('cesium').then(C=>viewer.current?.camera.flyTo({destination:C.Cartesian3.fromDegrees(103.82,1.35,21000000),duration:1.5}));}}>全球</button>
     </div>
+    {baseMap==='recent'&&<section className="satellite-panel" aria-label="近期卫星影像"><div><strong>近期卫星影像</strong><select aria-label="卫星影像选择" value={satelliteMode} onChange={e=>setSatelliteMode(e.target.value as SatelliteMode)}><option value="latest">最新优先</option><option value="clear">少云优先 · 近30天</option></select><button type="button" onClick={recent.refresh} disabled={recent.state.status==='loading'}>重新加载</button></div>{recent.state.scene&&recent.state.status==='ready'?<><p>拍摄时间：{new Date(recent.state.scene.acquiredAt).toLocaleString()}<br/>整景云量：{recent.state.scene.cloudCover===null?'未知':recent.state.scene.cloudCover.toFixed(1)+'%'} · 显示采样约 {recent.state.scene.resolutionMeters} m</p><p>Sentinel‑2 原始彩色波段 10 m · 优先选择视野中心影像。暗色区域为参考底图，可能没有本次拍摄覆盖。非连续直播。</p></>:<p role="status">{recent.state.message}</p>}<a href="/data/satellite-attribution.html" target="_blank" rel="noreferrer">CDSE · 拍摄时间、覆盖与缓存说明 ↗</a></section>}
     <div className={radarEnabled?"explorer-info explorer-info--radar":"explorer-info"} role="status">
       {error||(!ready?'加载卫星底图…':`视点高度 ${height} · 滚轮 / 双指连续缩放`)}
       {baseNote&&<div>{baseNote}</div>}

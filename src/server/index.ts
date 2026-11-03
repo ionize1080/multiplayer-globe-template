@@ -1,3 +1,4 @@
+import {satelliteScene,satelliteImage,SatelliteError} from './satellite';
 import {pointLocation} from './location-details';
 import { searchPlaces } from './place-search';
 import { cityWeather } from './weather-cities';
@@ -629,7 +630,7 @@ async function getStarlinkCatalog(origin?: string): Promise<StarlinkPayload> {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if(url.pathname.startsWith('/auth/')||url.pathname.startsWith('/api/globe/')) {
       try {
@@ -638,6 +639,8 @@ export default {
         const user=await globeUser(request,env.MAIL_DB);
         if(!user)return Response.json({error:'请先使用 IONACS 邮箱登录'},{status:401,headers:{'Cache-Control':'no-store'}});
         if(request.method==='GET'&&url.pathname.startsWith('/api/globe/terrain/'))return await terrainTile(request);
+        if(request.method==='GET'&&url.pathname==='/api/globe/satellite/scene')return await satelliteScene(request,env,await digest(user.email));
+        if(request.method==='GET'&&url.pathname.startsWith('/api/globe/satellite/image/'))return await satelliteImage(request,env,await digest(user.email),ctx);
         if(request.method==='GET'&&url.pathname==='/api/globe/location')return await pointLocation(request,env.MAIL_DB,await digest(user.email));
         if(request.method==='GET'&&url.pathname==='/api/globe/search')return await searchPlaces(request,env.MAIL_DB,await digest(user.email));
         if(request.method==='GET'&&url.pathname==='/api/globe/cities')return await cityWeather(env.MAIL_DB);
@@ -645,7 +648,7 @@ export default {
         if(request.method==='GET'&&url.pathname==='/api/globe/tile')return await weatherTile(request,env.MAIL_DB,await digest(user.email));
         if(request.method==='GET'&&url.pathname==='/api/globe/point')return await weatherPoint(request,env.MAIL_DB,await digest(user.email));
         if(request.method==='GET'&&url.pathname==='/api/globe/clouds')return Response.json(await cloudMetadata(4096),{headers:{'Cache-Control':'private, max-age=300'}});
-      } catch(error) { if(error instanceof WeatherLimit)return Response.json({error:error.message},{status:429,headers:{'Cache-Control':'no-store','Retry-After':'60'}});return Response.json({error:'服务暂不可用，请稍后重试'},{status:503,headers:{'Cache-Control':'no-store'}}); }
+      } catch(error) { if(error instanceof SatelliteError)return Response.json({error:error.message},{status:error.status,headers:{'Cache-Control':'no-store'}});if(error instanceof WeatherLimit)return Response.json({error:error.message},{status:429,headers:{'Cache-Control':'no-store','Retry-After':'60'}});return Response.json({error:'服务暂不可用，请稍后重试'},{status:503,headers:{'Cache-Control':'no-store'}}); }
     }
 
     if (request.method === "GET" && url.pathname === "/api/location") {
