@@ -16,7 +16,10 @@ export async function authRoute(req: Request,db: D1Database): Promise<Response|n
   if(url.pathname==='/api/globe/me')return Response.json({user:await globeUser(req,db)},{headers});
   if(url.pathname==='/auth/login' && req.method==='GET') {
     const state=randomToken();
-    return new Response(null,{status:302,headers:{...headers,Location:'https://ionacs.com/api/globe-authorize?state='+state,'Set-Cookie':cookie('__Host-ionize_state',state,600)}});
+    if(url.hostname==='map.ionize.club')return new Response(null,{status:302,headers:{...headers,Location:'https://ionize.club/auth/login?map_state='+state,'Set-Cookie':cookie('__Host-ionize_state',state,600)}});
+    const response=new Response(null,{status:302,headers:{...headers,Location:'https://ionacs.com/api/globe-authorize?state='+state,'Set-Cookie':cookie('__Host-ionize_state',state,600)}});
+    const mapState=url.hostname==='ionize.club'?url.searchParams.get('map_state')||'':'';
+    response.headers.append('Set-Cookie',cookie('__Host-ionize_map_state',/^[a-f0-9]{64}$/.test(mapState)?mapState:'',/^[a-f0-9]{64}$/.test(mapState)?600:0));return response;
   }
   if(url.pathname==='/auth/callback' && req.method==='GET') {
     const state=url.searchParams.get('state')||'',code=url.searchParams.get('code')||'';
@@ -26,7 +29,16 @@ export async function authRoute(req: Request,db: D1Database): Promise<Response|n
     const token=randomToken();
     await db.prepare('INSERT INTO globe_sessions VALUES(?,?,?)').bind(await digest(token),row.session_hash,now()+86400).run();
     const response=new Response(null,{status:302,headers:{...headers,Location:'/?explore=1','Set-Cookie':cookie(cookieName,token,86400)}});
-    response.headers.append('Set-Cookie',cookie('__Host-ionize_state','',0));return response;
+    response.headers.append('Set-Cookie',cookie('__Host-ionize_state','',0));
+    const mapState=cookieValue(req,'__Host-ionize_map_state');
+    if(url.hostname==='ionize.club'&&/^[a-f0-9]{64}$/.test(mapState)){
+      // The identity provider keeps its original callback. Transfer only a short-lived, single-use code.
+      // The map callback checks its own host-only state cookie before consuming the transfer.
+      const transfer=randomToken().slice(0,48);
+      await db.prepare('INSERT INTO globe_tickets(token_hash,session_hash,state,expires_at) VALUES(?,?,?,?)').bind(await digest(transfer),row.session_hash,mapState,now()+120).run();
+      response.headers.set('Location','https://map.ionize.club/auth/callback?state='+mapState+'&code='+transfer);
+    }
+    response.headers.append('Set-Cookie',cookie('__Host-ionize_map_state','',0));return response;
   }
   if(url.pathname==='/api/globe/logout' && req.method==='POST') {
     if(req.headers.get('Origin')!==url.origin)return new Response('Forbidden',{status:403,headers});
