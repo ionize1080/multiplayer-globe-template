@@ -37,7 +37,7 @@ for(let dataset=2;dataset<4;dataset++)for(const f of data[dataset].features){
   tile(Math.min(17,Math.floor((lon+180)/20)),Math.min(8,Math.floor((lat+90)/20))).places.push(place);
 }
 await mkdir('public/data/reference',{recursive:true});
-for(const [key,value] of tiles)await writeFile(`public/data/reference/${key}.json`,JSON.stringify(value));
+for(const [key,value] of tiles){await writeFile(`public/data/reference/${key}.json`,JSON.stringify(value));await writeFile(`public/data/reference/${key}.places.json`,JSON.stringify(value.places));}
 await writeFile('public/data/reference/index.json',JSON.stringify({version:'ne-5.1.2',size:20,tiles:[...tiles.keys()].sort()}));
 await writeFile('public/data/places.json',JSON.stringify(overview));
 console.log(`Prepared ${tiles.size} geographic chunks and ${overview.length} overview city labels.`);

@@ -1,4 +1,5 @@
 import { weatherPoint, WeatherLimit } from './weather-access';
+import { terrainTile } from './terrain';
 import { cloudWidth, cloudMetadata, cloudTexture } from "./clouds";
 import { authRoute, globeUser, digest } from './globe-auth';
 import { weatherGrid, weatherTile } from './weather-grid';
@@ -633,6 +634,7 @@ export default {
         if(auth)return auth;
         const user=await globeUser(request,env.MAIL_DB);
         if(!user)return Response.json({error:'请先使用 IONACS 邮箱登录'},{status:401,headers:{'Cache-Control':'no-store'}});
+        if(request.method==='GET'&&url.pathname.startsWith('/api/globe/terrain/'))return await terrainTile(request);
         if(request.method==='GET'&&url.pathname==='/api/globe/weather')return await weatherGrid(request,env.MAIL_DB);
         if(request.method==='GET'&&url.pathname==='/api/globe/tile')return await weatherTile(request,env.MAIL_DB,await digest(user.email));
         if(request.method==='GET'&&url.pathname==='/api/globe/point')return await weatherPoint(request,env.MAIL_DB,await digest(user.email));

@@ -1,0 +1,21 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Terrain data · ionize.club</title>
+<style>body{max-width:780px;margin:48px auto;padding:0 24px;background:#0b1423;color:#dce7f2;font:15px/1.8 system-ui}a{color:#7dd3fc}h1{font-size:28px}li{margin:12px 0}small{color:#9eafc2}</style>
+<h1>地形数据与精度</h1>
+<p>海拔着色、地形阴影、等高线和点位高程由开放的 Mapzen Terrain Tiles 生成。瓦片按当前视野加载，来自 SRTM、3DEP、EU-DEM 等多源高程数据。中国主要采用约 30 米采样的 SRTM，来源说明标注其名义质量约 90 米；其他区域从数米到数百米不等。瓦片像素间距、等高距均不等于测量精度。</p>
+<p>坐标使用 WGS84 / Web Mercator，没有添加 GCJ-02 或 BD-09 偏移。覆盖范围约南北纬 85.05° 之间。显示的是 DEM 高程估计，垂直基准与误差取决于来源；这不是实时水位、气象模型高度或测绘成果。海域可能提供较粗的海底高程，负值也可能是低于海平面的陆地，不能直接当作水深。</p>
+<p>等高线在区域尺度开始显示，等高距随缩放从 500 米细化到 20 米，粗线为五倍等高距。地形阴影采用固定方向照明；海拔颜色为地形示意，不是实拍颜色。气温、云图及地形分别表示不同物理量。</p>
+<p><a href="https://github.com/tilezen/joerd/blob/master/docs/data-sources.md">数据来源与覆盖</a> · <a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md">完整归属与许可说明</a> · <a href="https://github.com/tilezen/joerd/blob/master/docs/formats.md">Terrarium 格式</a></p>
+<h2>Attribution</h2><ul>
+<li>Mapzen</li>
+<li>ArcticDEM terrain data DEM(s) were created from DigitalGlobe, Inc., imagery and funded under National Science Foundation awards 1043681, 1559691, and 1542736;</li>
+<li>Australia terrain data © Commonwealth of Australia (Geoscience Australia) 2017;</li>
+<li>Austria terrain data © offene Daten Österreichs – Digitales Geländemodell (DGM) Österreich;</li>
+<li>Canada terrain data contains information licensed under the Open Government Licence – Canada;</li>
+<li>Europe terrain data produced using Copernicus data and information funded by the European Union - EU-DEM layers;</li>
+<li>Global ETOPO1 terrain data U.S. National Oceanic and Atmospheric Administration;</li>
+<li>Mexico terrain data source: INEGI, Continental relief, 2016;</li>
+<li>New Zealand terrain data Copyright 2011 Crown copyright (c) Land Information New Zealand and the New Zealand Government (All rights reserved);</li>
+<li>Norway terrain data © Kartverket;</li>
+<li>United Kingdom terrain data © Environment Agency copyright and/or database right 2015. All rights reserved;</li>
+<li>United States 3DEP (formerly NED) and global GMTED2010 and SRTM terrain data courtesy of the U.S. Geological Survey.</li>
+</ul><p><a href="/">返回 ionize.club</a></p></html>

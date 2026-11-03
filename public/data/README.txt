@@ -10,3 +10,7 @@ Sources additionally include ne_10m_admin_0_boundary_lines_land.geojson, ne_10m_
 Lines are clipped to 20-degree WGS84 cells. Names prefer Chinese where available.
 places.json now contains only the overview cities; finer cities and province labels are in spatial chunks.
 1:10m means 1:10,000,000 cartographic scale, NOT 10-metre accuracy.
+
+reference/*.places.json contains label-only payloads for independent, faster place-name loading.
+Terrain overlays use Mapzen Terrarium XYZ tiles via the authenticated terrain proxy.
+See terrain-attribution.html for all required source credits, resolution and coverage limitations.

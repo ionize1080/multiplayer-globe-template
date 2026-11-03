@@ -1,5 +1,6 @@
 import {useReferenceLayers} from './use-reference-layers';
 import {useWeatherLayers} from './use-weather-layers';
+import {useTerrainLayers} from './use-terrain-layers';
 import React,{useEffect,useRef,useState} from 'react';
 import type {Viewer,ImageryLayer} from 'cesium';
 type PointWeather={time:string,sampleLatitude:number,sampleLongitude:number,current:Record<string,number|string|null>,units:Record<string,string>};
@@ -8,15 +9,21 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
   const [ready,setReady]=useState(false),[error,setError]=useState(''),[clouds,setClouds]=useState(false),[cloudStrength,setCloudStrength]=useState(.6),[temperature,setTemperature]=useState(false),[wind,setWind]=useState(false),[boundaries,setBoundaries]=useState(false),[labels,setLabels]=useState(false),[opacity,setOpacity]=useState(.55),[cloudNote,setCloudNote]=useState(''),[height,setHeight]=useState(''),[selected,setSelected]=useState('');
   const windLayer=useRef<ImageryLayer|null>(null),weatherLayer=useRef<ImageryLayer|null>(null),cloudLayer=useRef<ImageryLayer|null>(null);
   const [picked,setPicked]=useState<{lat:number,lon:number}|null>(null),[pointWeather,setPointWeather]=useState<PointWeather|null>(null),[pointError,setPointError]=useState(''),[pointLoading,setPointLoading]=useState(false);
-  const weatherEnabled=clouds||temperature||wind,weatherEnabledRef=useRef(weatherEnabled),pointSequence=useRef(0);
-  weatherEnabledRef.current=weatherEnabled;
-  useEffect(()=>{if(!weatherEnabled){setPicked(null);viewer.current?.entities.removeById('weather-point');}},[weatherEnabled]);
+  const [elevation,setElevation]=useState(false),[hillshade,setHillshade]=useState(false),[contours,setContours]=useState(false),[terrainOpacity,setTerrainOpacity]=useState(.75),[pointElevation,setPointElevation]=useState<number|null>(null),[elevationError,setElevationError]=useState('');
+  const weatherEnabled=clouds||temperature||wind,inspectEnabled=weatherEnabled||elevation||hillshade||contours,weatherEnabledRef=useRef(inspectEnabled),pointSequence=useRef(0);
+  weatherEnabledRef.current=inspectEnabled;
+  useEffect(()=>{if(!inspectEnabled){setPicked(null);viewer.current?.entities.removeById('weather-point');}},[inspectEnabled]);
   useEffect(()=>{
-    if(!picked)return;const abort=new AbortController(),sequence=++pointSequence.current;
+    if(!picked||!weatherEnabled){setPointWeather(null);setPointError('');setPointLoading(false);return;}const abort=new AbortController(),sequence=++pointSequence.current;
     setPointLoading(true);setPointError('');setPointWeather(null);
     // Brief debounce coalesces successive map clicks before spending quota.
     const timer=setTimeout(()=>{void (async()=>{try{const response=await fetch(`/api/globe/point?v=2&lat=${picked.lat}&lon=${picked.lon}`,{signal:abort.signal});if(response.status===401){onExpired();return;}const data=await response.json();if(!response.ok)throw Error(data.error||'天气数据暂不可用');if(sequence===pointSequence.current)setPointWeather(data);}catch(error){if(!abort.signal.aborted&&sequence===pointSequence.current)setPointError(error instanceof Error?error.message:'天气数据暂不可用');}finally{if(!abort.signal.aborted&&sequence===pointSequence.current)setPointLoading(false);}})();},350);
     return()=>{abort.abort();clearTimeout(timer);};
+  },[picked,weatherEnabled]);
+  useEffect(()=>{
+    setPointElevation(null);setElevationError('');if(!picked)return;let cancelled=false;
+    const timer=setTimeout(()=>{const data=terrain.data.current;if(!data)return;void data.point(picked.lat,picked.lon).then(value=>{if(!cancelled)setPointElevation(value);}).catch(error=>{if(!cancelled)setElevationError(error instanceof Error?error.message:'海拔数据暂不可用');});},200);
+    return()=>{cancelled=true;clearTimeout(timer);};
   },[picked]);
   useEffect(()=>{let cancelled=false;const frame=requestAnimationFrame(()=>{const v=viewer.current;if(!v)return;v.resize();v.scene.requestRender();if(picked)void import('cesium').then(C=>{if(!cancelled&&!v.isDestroyed())v.camera.flyTo({destination:C.Cartesian3.fromDegrees(picked.lon,picked.lat,v.camera.positionCartographic.height),duration:.5});});});return()=>{cancelled=true;cancelAnimationFrame(frame);};},[picked]);
   const opacityRef=useRef(opacity),cloudStrengthRef=useRef(cloudStrength);opacityRef.current=opacity;cloudStrengthRef.current=cloudStrength;
@@ -65,6 +72,7 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
   useEffect(()=>{if(weatherLayer.current)weatherLayer.current.alpha=opacity;viewer.current?.scene.requestRender();},[opacity]);
   useEffect(()=>{if(cloudLayer.current)cloudLayer.current.alpha=cloudStrength;viewer.current?.scene.requestRender();},[cloudStrength]);
   const referenceNote=useReferenceLayers(viewer,ready,boundaries,labels);
+  const terrain=useTerrainLayers(viewer,ready,{elevation,hillshade,contours},terrainOpacity,onExpired,restack);
   const zoom=async(factor:number)=>{const C=await import('cesium'),v=viewer.current;if(!v)return;const p=v.camera.positionCartographic;v.camera.flyTo({destination:C.Cartesian3.fromRadians(p.longitude,p.latitude,Math.max(100,Math.min(50000000,p.height*factor))),duration:.45});};
   const metric=(key:string,digits=1)=>{const value=pointWeather?.current[key];return typeof value==='number'&&Number.isFinite(value)?value.toFixed(digits):'—';};
   const closePoint=()=>{setPicked(null);viewer.current?.entities.removeById('weather-point');viewer.current?.scene.requestRender();};
@@ -74,13 +82,22 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
     <div ref={container} className="explorer-canvas"/>
     <button ref={exitButton} className="explorer-exit" type="button" onClick={onExit} title="返回地球（Esc）">← 返回地球 <kbd>Esc</kbd></button>
     <div className="explorer-tools" role="group" aria-label="叠加图层">
+      <details className="explorer-layer-menu"><summary>图层 <span>{[clouds,temperature,wind,boundaries,labels,elevation,hillshade,contours].filter(Boolean).length || ''}</span></summary><div className="explorer-layer-options">
+      <div className="layer-section-title">天气</div>
       <label><input type="checkbox" checked={clouds} onChange={e=>setClouds(e.target.checked)}/>近实时云图</label>
       <label><input type="checkbox" checked={temperature} onChange={e=>setTemperature(e.target.checked)}/>空气温度</label>
       <label><input type="checkbox" checked={wind} onChange={e=>setWind(e.target.checked)}/>风速 / 风向</label>
-      <label><input type="checkbox" checked={boundaries} onChange={e=>setBoundaries(e.target.checked)}/>地理界线</label>
-      <label><input type="checkbox" checked={labels} onChange={e=>setLabels(e.target.checked)}/>地名</label>
       {clouds&&<label title="只改变显示强弱，不代表云的物理厚度">云层叠加强度<input aria-label="云层叠加强度" type="range" min="0" max="1" step="0.05" value={cloudStrength} onChange={e=>setCloudStrength(+e.target.value)}/><span>{Math.round(cloudStrength*100)}%</span></label>}
       {(temperature||wind)&&<label>天气透明度<input type="range" min="0.1" max="0.9" step="0.05" value={opacity} onChange={e=>setOpacity(+e.target.value)}/></label>}
+      <div className="layer-section-title">地形与参考</div>
+      <label><input type="checkbox" checked={elevation} onChange={e=>setElevation(e.target.checked)}/>海拔着色</label>
+      <label><input type="checkbox" checked={hillshade} onChange={e=>setHillshade(e.target.checked)}/>地形阴影</label>
+      <label><input type="checkbox" checked={contours} onChange={e=>setContours(e.target.checked)}/>等高线</label>
+      {(elevation||hillshade||contours)&&<label>地形叠加强度<input aria-label="地形叠加强度" type="range" min="0.1" max="1" step="0.05" value={terrainOpacity} onChange={e=>setTerrainOpacity(+e.target.value)}/><span>{Math.round(terrainOpacity*100)}%</span></label>}
+      <label><input type="checkbox" checked={boundaries} onChange={e=>setBoundaries(e.target.checked)}/>地理界线</label>
+      <label><input type="checkbox" checked={labels} onChange={e=>setLabels(e.target.checked)}/>地名</label>
+      <p className="layer-hint">各层可同时开启 · 再点“图层”收起</p>
+      </div></details>
       <button onClick={()=>void zoom(.5)} aria-label="放大">＋</button><button onClick={()=>void zoom(2)} aria-label="缩小">－</button>
       <button onClick={()=>{void import('cesium').then(C=>viewer.current?.camera.flyTo({destination:C.Cartesian3.fromDegrees(103.82,1.35,21000000),duration:1.5}));}}>全球</button>
     </div>
@@ -89,11 +106,13 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
       {clouds&&<div>{cloudNote||'加载云图…'}</div>}
       {(temperature||wind)&&<><div>{note}</div><div className="weather-scale"/>{temperature&&<div>气温：−40 °C　　5 °C　　50 °C</div>}{wind&&<div>风速{temperature?'（箭头颜色）':''}：0　　15　　30+ m/s · 箭头指向下风向</div>}</>}
       {(boundaries||labels)&&<div>{referenceNote||'参考界线 / 城市地名：Natural Earth'}</div>}
-      {weatherEnabled&&!picked&&<div>点击地图，查看该位置的天气详情</div>}{selected&&!picked&&<div>{selected} · WGS84</div>}
+      {(elevation||hillshade||contours)&&<><div>{terrain.error||'Mapzen 地形 · 多源 DEM，精度因区域而异'}</div>{elevation&&<><div className="terrain-scale"/><div>海底　0　500　1,500　3,000　5,000+ m</div></>}{contours&&<div>放大显示等高线 · 等高距 20–500 m · 粗线为 5 倍等高距</div>}{hillshade&&<div>地形阴影为固定光照示意</div>}</>}
+      {inspectEnabled&&!picked&&<div>点击地图，查看海拔{weatherEnabled?'与天气':''}详情</div>}{selected&&!picked&&<div>{selected} · WGS84</div>}
     </div></div>
-    {picked&&<aside className="weather-details" aria-label="点位天气详情">
-      <header className="weather-details-heading"><div><span className="weather-eyebrow">LOCAL WEATHER</span><h2>点位天气</h2></div><button type="button" onClick={closePoint} aria-label="关闭天气详情">×</button></header>
+    {picked&&<aside className="weather-details" aria-label="点位详情">
+      <header className="weather-details-heading"><div><span className="weather-eyebrow">LOCATION INSIGHTS</span><h2>点位详情</h2></div><button type="button" onClick={closePoint} aria-label="关闭点位详情">×</button></header>
       <p className="weather-coordinates">{Math.abs(picked.lat).toFixed(4)}° {picked.lat>=0?'N':'S'}　{Math.abs(picked.lon).toFixed(4)}° {picked.lon>=0?'E':'W'}</p>
+      <section className="point-elevation" aria-label="海拔详情"><span>地形海拔</span><strong>{pointElevation===null?'—':Math.round(pointElevation).toLocaleString()}<small>m</small></strong><p role="status">{elevationError||(pointElevation===null?'正在读取海拔…':pointElevation<0?'低于海平面；海域为海底地形，非水面高度。':'DEM 高程估计；水域不表示水深或实时水位。')}</p><a href="/data/terrain-attribution.html" target="_blank" rel="noreferrer">Mapzen · 数据来源与精度 ↗</a></section>
       <div className="weather-point-status" role="status" aria-live="polite">{pointLoading?'正在获取该点天气…':pointError||(pointWeather?new Date(pointWeather.time).toLocaleString()+' · 模型有效时间':'')}</div>
       {pointWeather&&<><div className="weather-temperature"><span>{metric('temperature_2m')}</span><span>°C</span><p>空气温度 · 地表上方 2 m，非水温</p></div>
         <dl className="weather-metrics">{fields.map(([label,key,unit,digits])=><div key={key}><dt>{label}</dt><dd>{metric(key,digits)}<small>{unit}</small></dd></div>)}</dl>

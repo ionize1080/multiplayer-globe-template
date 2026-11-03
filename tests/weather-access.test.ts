@@ -4,6 +4,15 @@ import {readFileSync} from 'node:fs';
 import {Miniflare} from 'miniflare';
 import {weatherTile,weatherGrid} from '../src/server/weather-grid';
 import {weatherData,weatherPoint,WeatherLimit} from '../src/server/weather-access';
+test('global grid sends one disabled-downscaling value for each of 264 locations',async()=>{
+  const mf=new Miniflare({modules:true,script:'export default {fetch(){return new Response("ok")}}',compatibilityDate:'2025-04-01',d1Databases:['DB']});
+  const original=globalThis.fetch;
+  try{
+    const db=await mf.getD1Database('DB');for(const sql of readFileSync('migrations/0001_weather_cache.sql','utf8').split(';').filter(s=>s.trim()))await db.prepare(sql).run();
+    globalThis.fetch=async(input)=>{const url=new URL(String(input)),latitudes=url.searchParams.get('latitude')!.split(',');assert.equal(latitudes.length,264);assert.deepEqual(url.searchParams.get('elevation')!.split(','),latitudes.map(()=>'nan'));return Response.json(latitudes.map(()=>({current:{time:'2026-11-03T09:00',temperature_2m:10,wind_speed_10m:5,wind_direction_10m:90}})));};
+    const response=await weatherGrid(new Request('https://ionize.club/api/globe/weather?v=2'),db),data=await response.json();assert.equal(data.points.length,264);assert.equal(data.points[0].temperature,10);
+  }finally{globalThis.fetch=original;await mf.dispose();}
+});
 test('point air temperature bypasses cached lapse-rate artifacts and reports sea-level pressure',async()=>{
   const mf=new Miniflare({modules:true,script:'export default {fetch(){return new Response("ok")}}',compatibilityDate:'2025-04-01',d1Databases:['DB']});
   const original=globalThis.fetch;let calls=0;

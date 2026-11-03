@@ -978,6 +978,21 @@ a:hover {
 .weather-metrics small { color:#8ea1ba; font-size:11px; margin-left:6px; }
 .weather-detail-note { color:#8194ad; font-size:10px; line-height:1.9; }
 .weather-source { display:inline-block; font-size:11px; margin-top:16px; color:#7dd3fc; }
+.explorer-layer-menu { position:relative; }
+.explorer-layer-menu summary { cursor:pointer; padding:7px 10px; border:1px solid #475569; border-radius:7px; min-width:65px; }
+.explorer-layer-menu summary span { color:#7dd3fc; padding-left:4px; }
+.explorer-layer-options { position:absolute; top:calc(100% + 15px); left:-10px; width:min(290px,calc(100vw - 48px)); box-sizing:border-box; max-height:calc(100dvh - 190px); overflow:auto; padding:16px; border:1px solid #344254; border-radius:12px; background:#0e192bf5; box-shadow:0 12px 40px #0005; display:flex; flex-direction:column; gap:12px; }
+.layer-section-title { color:#809bb5; font-size:10px; letter-spacing:1.5px; border-bottom:1px solid #29394d; padding:3px 0 9px; }
+.explorer-layer-options label { min-height:22px; font-size:12px; }
+.explorer-layer-options input[type=checkbox] { accent-color:#83c7ea; width:15px; height:15px; margin-right:5px; }
+.layer-hint { margin:3px 0 0; color:#8397ae; font-size:10px; }
+.terrain-scale { height:5px; width:230px; margin:6px 0; background:linear-gradient(90deg,#2a6a8a,#478564,#90a36d,#beaa7a,#a07c64,#b7afa8,#f5f7fa); }
+.point-elevation { padding:16px 0; margin-bottom:14px; border-bottom:1px solid #263449; }
+.point-elevation > span { font-size:11px; color:#8ea1ba; }
+.point-elevation strong { display:block; margin:7px 0; font-size:28px; font-weight:400; font-variant-numeric:tabular-nums; }
+.point-elevation small { font-size:12px; color:#9eb7ce; margin-left:8px; }
+.point-elevation p { font-size:10px; line-height:1.6; color:#8194ad; margin:6px 0; }
+.point-elevation a { font-size:10px; color:#7dd3fc; }
 @media (max-width: 800px) {
   .explorer--details { grid-template-columns:1fr; grid-template-rows:minmax(240px, 58%) minmax(0, 42%); }
   .weather-details { border-left:0; border-top:1px solid #263449; padding:16px 20px; }
