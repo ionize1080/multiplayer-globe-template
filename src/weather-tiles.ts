@@ -1,7 +1,7 @@
 // Shared WGS84 tile geometry. Integer tile IDs make nearby users reuse the cache.
 export const WEATHER_STEPS = [5, 2.5, 1, .5, .25, .1, .05, .025] as const;
 export type Bounds = {west:number;south:number;east:number;north:number};
-export type WeatherPoint = {lat:number;lon:number;time:string|null;temperature:number|null;wind:number|null;direction:number|null};
+export type WeatherPoint = {humidity?:number|null;pressure?:number|null;cloud?:number|null;lat:number;lon:number;time:string|null;temperature:number|null;wind:number|null;direction:number|null};
 export type WeatherGrid = {points:WeatherPoint[];resolution:number;fetchedAt:string};
 export type WeatherTile = WeatherGrid & Bounds & {level:number;x:number;y:number;stale?:boolean};
 export const wrapLongitude=(lon:number)=>((lon+180)%360+360)%360-180;

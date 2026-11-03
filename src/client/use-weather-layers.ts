@@ -1,9 +1,10 @@
+import type {WeatherField} from './weather-palettes';
 import {useEffect,useRef,useState,type RefObject,type MutableRefObject} from 'react';
 import type {Viewer,ImageryLayer} from 'cesium';
 import {planWeatherTiles,type Bounds,type WeatherGrid,type WeatherTile} from '../weather-tiles';
 import {drawWeather} from './weather-render';
 
-export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperature:boolean,wind:boolean,opacity:MutableRefObject<number>,colorLayer:MutableRefObject<ImageryLayer|null>,windLayer:MutableRefObject<ImageryLayer|null>,restack:()=>void,onExpired:()=>void){
+export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperature:boolean,wind:boolean,opacity:MutableRefObject<number>,colorLayer:MutableRefObject<ImageryLayer|null>,windLayer:MutableRefObject<ImageryLayer|null>,restack:()=>void,onExpired:()=>void,field:WeatherField='temperature'){
   const [note,setNote]=useState('');
   const global=useRef<WeatherGrid|null>(null),tiles=useRef(new Map<string,WeatherTile>());
   const pending=useRef(new Map<string,Promise<WeatherTile>>()),globalPending=useRef<Promise<WeatherGrid>|null>(null);
@@ -19,11 +20,11 @@ export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperat
     };
     const tileData=async(tile:ReturnType<typeof planWeatherTiles>[number],stillNeeded:()=>boolean)=>{
       const existing=tiles.current.get(tile.key);
-      if(existing&&!existing.stale&&Date.now()-Date.parse(existing.fetchedAt)<3600000)return Promise.resolve(existing);
+      if(existing&&!existing.stale&&Date.now()-Date.parse(existing.fetchedAt)<1800000)return Promise.resolve(existing);
       const running=pending.current.get(tile.key);if(running)return running;
       while(pending.current.size>=2)await Promise.race([...pending.current.values()].map(p=>p.catch(()=>null)));
       if(!stillNeeded())throw Error('视野已改变');
-      const completed=tiles.current.get(tile.key);if(completed&&!completed.stale&&Date.now()-Date.parse(completed.fetchedAt)<3600000)return completed;
+      const completed=tiles.current.get(tile.key);if(completed&&!completed.stale&&Date.now()-Date.parse(completed.fetchedAt)<1800000)return completed;
       const joined=pending.current.get(tile.key);if(joined)return joined;
       if(Date.now()<cooldown.current)return Promise.reject(Error('请求限额保护中，保留概览或已缓存数据'));
       const promise=(async()=>{
@@ -42,7 +43,7 @@ export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperat
       const rectangle=v!.camera.computeViewRectangle();
       const bounds:Bounds=rectangle?{west:C.Math.toDegrees(rectangle.west),east:C.Math.toDegrees(rectangle.east),south:C.Math.toDegrees(rectangle.south),north:C.Math.toDegrees(rectangle.north)}:{west:-180,east:180,south:-90,north:90};
       const plan=planWeatherTiles(bounds),drawingBounds=plan.length?bounds:{west:-180,east:180,south:-90,north:90};
-      let warning='';setNote(plan.length?`正在加载视野细网格 · ${plan[0].resolution}° 采样`:'正在加载全球概览…');
+      let warning='';setNote(plan.length?`正在加载视野细网格 · ${plan[0].resolution}° 显示采样`:'正在加载全球概览…');
       try{await globalData();}catch(error){warning=error instanceof Error?error.message:'概览暂不可用';}
       if(stopped||id!==sequence)return;
       const cachedTiles=()=>plan.map(t=>tiles.current.get(t.key)).filter((t):t is WeatherTile=>!!t&&Date.now()-Date.parse(t.fetchedAt)<6*3600000);
@@ -50,7 +51,8 @@ export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperat
         const data=cachedTiles(),canvas=v!.scene.canvas;
         const width=plan.length?Math.max(512,Math.min(1536,Math.round(canvas.clientWidth*1.5))):1440;
         const height=plan.length?Math.max(384,Math.min(1024,Math.round(canvas.clientHeight*1.5))):720;
-        const result=await drawWeather(drawingBounds,global.current,data,temperature,wind,width,height,()=>stopped||id!==sequence);
+        const project=<T extends WeatherGrid>(grid:T):T=>field==='temperature'?grid:{...grid,points:grid.points.map(p=>({...p,temperature:p[field]??null}))};
+        const result=await drawWeather(drawingBounds,global.current?project(global.current):null,data.map(project),temperature,wind,width,height,()=>stopped||id!==sequence,field);
         if(!result||stopped||id!==sequence)return;
         const rect=C.Rectangle.fromDegrees(drawingBounds.west,drawingBounds.south,drawingBounds.east,drawingBounds.north);
         const provider=await C.SingleTileImageryProvider.fromUrl(result.canvas.toDataURL(),{rectangle:rect,credit:new C.Credit('<a href="https://open-meteo.com/">Weather: Open-Meteo</a>',true)});
@@ -61,8 +63,8 @@ export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperat
         windLayer.current=arrowProvider?v!.imageryLayers.addImageryProvider(arrowProvider):null;restack();
         const times=[...(data.length===plan.length&&plan.length?[]:global.current?.points||[]),...data.flatMap(t=>t.points)].map(p=>p.time).filter((t):t is string=>!!t).sort();
         const timeLabel=times[0]?new Date(times[0]).toLocaleString()+(times.at(-1)!==times[0]?' – '+new Date(times.at(-1)!).toLocaleTimeString():''):'时间未知';
-        const summary=plan.length?`${plan[0].resolution}° 采样 · 细网格 ${data.length}/${plan.length}${temperature&&data.length?' · 等温线 5°C':''}`:'15° 全球概览';
-        setNote(`${summary} · ${timeLabel} · 模型估计，非实测${data.some(t=>t.stale||Date.now()-Date.parse(t.fetchedAt)>3600000)?' · 使用旧缓存':''}${warning?' · '+warning:''}`);
+        const summary=plan.length?`${plan[0].resolution}° 显示采样 · 细网格 ${data.length}/${plan.length}${temperature&&field==='temperature'&&data.length?' · 等温线 5°C':''}`:'15° 全球概览';
+        setNote(`${summary} · ${timeLabel} · 原生模型精度因地区而异，非实测${data.some(t=>t.stale||Date.now()-Date.parse(t.fetchedAt)>1800000)?' · 使用旧缓存':''}${warning?' · '+warning:''}`);
       }
       // Show cached detail/coarse fallback first. Exactly two tile requests in flight.
       await render();if(stopped||id!==sequence||!plan.length)return;
@@ -74,6 +76,6 @@ export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperat
     removeMove=v.camera.moveEnd.addEventListener(schedule);const removeStart=v.camera.moveStart.addEventListener(()=>{if(windLayer.current)windLayer.current.show=false;});resize=new ResizeObserver(schedule);resize.observe(v.container);
     schedule();const interval=setInterval(schedule,60000);
     return()=>{stopped=true;sequence++;clearTimeout(timer);clearInterval(interval);removeMove?.();removeStart();resize?.disconnect();if(!v.isDestroyed()){if(colorLayer.current)v.imageryLayers.remove(colorLayer.current);if(windLayer.current)v.imageryLayers.remove(windLayer.current);colorLayer.current=null;windLayer.current=null;v.scene.requestRender();}};
-  },[ready,temperature,wind]);
+  },[ready,temperature,wind,field]);
   return note;
 }

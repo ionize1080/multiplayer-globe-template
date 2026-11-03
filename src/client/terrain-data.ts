@@ -34,7 +34,7 @@ export class TerrainData {
     })();
     this.pending.set(key,task);try{return await task;}finally{this.pending.delete(key);}
   }
-  private pump(){while(this.active<4&&this.queue.length){this.active++;this.queue.shift()!();}}
+  private pump(){while(this.active<6&&this.queue.length){this.active++;this.queue.shift()!();}}
   async point(lat:number,lon:number){
     const p=terrainPosition(lat,lon,TERRAIN_MAX_LEVEL);if(!p)throw Error('此纬度超出地形数据覆盖范围');
     // Nearest native sample: no smoothing across shorelines or invented water level.

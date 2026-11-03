@@ -1,0 +1,3 @@
+import {renderTerrain,type TerrainOptions} from './terrain-render';
+const scope=self as unknown as {onmessage:((event:MessageEvent)=>void)|null;postMessage:(message:unknown,transfer?:Transferable[])=>void};
+scope.onmessage=async(event:MessageEvent<{id:number;grid:Float32Array;z:number;y:number;options:TerrainOptions}>)=>{const {id,grid,z,y,options}=event.data;try{const canvas=await renderTerrain(grid,z,y,options);const bitmap=(canvas as OffscreenCanvas).transferToImageBitmap();scope.postMessage({id,bitmap},[bitmap]);}catch{scope.postMessage({id,error:'Terrain rendering failed'});}};

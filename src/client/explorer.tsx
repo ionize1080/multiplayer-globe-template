@@ -1,3 +1,7 @@
+import {CityWeather} from './city-weather';
+import {useRadar} from './use-radar';
+import {weatherFields,fieldGradient,type WeatherField} from './weather-palettes';
+import {PlaceSearch} from './place-search';
 import {useReferenceLayers} from './use-reference-layers';
 import {useWeatherLayers} from './use-weather-layers';
 import {useTerrainLayers} from './use-terrain-layers';
@@ -6,18 +10,23 @@ import type {Viewer,ImageryLayer} from 'cesium';
 type PointWeather={time:string,sampleLatitude:number,sampleLongitude:number,current:Record<string,number|string|null>,units:Record<string,string>};
 export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:()=>void}) {
   const container=useRef<HTMLDivElement>(null), viewer=useRef<Viewer|null>(null);
-  const [ready,setReady]=useState(false),[error,setError]=useState(''),[clouds,setClouds]=useState(false),[cloudStrength,setCloudStrength]=useState(.6),[temperature,setTemperature]=useState(false),[wind,setWind]=useState(false),[boundaries,setBoundaries]=useState(false),[labels,setLabels]=useState(false),[opacity,setOpacity]=useState(.55),[cloudNote,setCloudNote]=useState(''),[height,setHeight]=useState(''),[selected,setSelected]=useState('');
+  const [ready,setReady]=useState(false),[error,setError]=useState(''),[clouds,setClouds]=useState(false),[cloudStrength,setCloudStrength]=useState(.6),[temperature,setTemperature]=useState(true),[wind,setWind]=useState(false),[boundaries,setBoundaries]=useState(true),[labels,setLabels]=useState(false),[opacity,setOpacity]=useState(.78),[cloudNote,setCloudNote]=useState(''),[height,setHeight]=useState(''),[selected,setSelected]=useState('');
+  const [field,setField]=useState<WeatherField>('temperature'),[radarEnabled,setRadarEnabled]=useState(false),[citiesEnabled,setCitiesEnabled]=useState(true),[flat,setFlat]=useState(false),[baseMap,setBaseMap]=useState<'satellite'|'map'>('satellite'),[baseNote,setBaseNote]=useState('');
+  const baseLayer=useRef<ImageryLayer|null>(null),baseCache=useRef<Partial<Record<'satellite'|'map',ImageryLayer>>>({});
+  const radar=useRadar(viewer,ready,radarEnabled);
+  const choose=(value:WeatherField|'wind'|'radar'|'satellite')=>{setTemperature(value!=='wind'&&value!=='radar'&&value!=='satellite');setWind(value==='wind');setRadarEnabled(value==='radar');setClouds(value==='satellite');if(value!=='wind'&&value!=='radar'&&value!=='satellite')setField(value);};
+  const pickCity=(p:{lat:number;lon:number})=>{setPicked(p);void import('cesium').then(C=>{const v=viewer.current;if(!v)return;v.entities.removeById('weather-point');v.entities.add({id:'weather-point',position:C.Cartesian3.fromDegrees(p.lon,p.lat),point:{pixelSize:10,color:C.Color.fromCssColorString('#7dd3fc'),outlineColor:C.Color.WHITE,outlineWidth:2}});v.camera.cancelFlight();v.camera.flyTo({destination:C.Cartesian3.fromDegrees(p.lon,p.lat,1800000),duration:1});});};
   const windLayer=useRef<ImageryLayer|null>(null),weatherLayer=useRef<ImageryLayer|null>(null),cloudLayer=useRef<ImageryLayer|null>(null);
   const [picked,setPicked]=useState<{lat:number,lon:number}|null>(null),[pointWeather,setPointWeather]=useState<PointWeather|null>(null),[pointError,setPointError]=useState(''),[pointLoading,setPointLoading]=useState(false);
   const [elevation,setElevation]=useState(false),[hillshade,setHillshade]=useState(false),[contours,setContours]=useState(false),[terrainOpacity,setTerrainOpacity]=useState(.75),[pointElevation,setPointElevation]=useState<number|null>(null),[elevationError,setElevationError]=useState('');
-  const weatherEnabled=clouds||temperature||wind,inspectEnabled=weatherEnabled||elevation||hillshade||contours,weatherEnabledRef=useRef(inspectEnabled),pointSequence=useRef(0);
+  const weatherEnabled=clouds||temperature||wind||radarEnabled||citiesEnabled,inspectEnabled=weatherEnabled||elevation||hillshade||contours,weatherEnabledRef=useRef(inspectEnabled),pointSequence=useRef(0);
   weatherEnabledRef.current=inspectEnabled;
   useEffect(()=>{if(!inspectEnabled){setPicked(null);viewer.current?.entities.removeById('weather-point');}},[inspectEnabled]);
   useEffect(()=>{
     if(!picked||!weatherEnabled){setPointWeather(null);setPointError('');setPointLoading(false);return;}const abort=new AbortController(),sequence=++pointSequence.current;
     setPointLoading(true);setPointError('');setPointWeather(null);
     // Brief debounce coalesces successive map clicks before spending quota.
-    const timer=setTimeout(()=>{void (async()=>{try{const response=await fetch(`/api/globe/point?v=2&lat=${picked.lat}&lon=${picked.lon}`,{signal:abort.signal});if(response.status===401){onExpired();return;}const data=await response.json();if(!response.ok)throw Error(data.error||'天气数据暂不可用');if(sequence===pointSequence.current)setPointWeather(data);}catch(error){if(!abort.signal.aborted&&sequence===pointSequence.current)setPointError(error instanceof Error?error.message:'天气数据暂不可用');}finally{if(!abort.signal.aborted&&sequence===pointSequence.current)setPointLoading(false);}})();},350);
+    const timer=setTimeout(()=>{void (async()=>{try{const response=await fetch(`/api/globe/point?v=2&lat=${picked.lat}&lon=${picked.lon}`,{signal:abort.signal});if(response.status===401){onExpired();return;}const data=await response.json().catch(()=>({error:'天气服务暂不可用，请稍后重试'}));if(!response.ok)throw Error(data.error||'天气数据暂不可用');if(sequence===pointSequence.current)setPointWeather(data);}catch(error){if(!abort.signal.aborted&&sequence===pointSequence.current)setPointError(error instanceof Error?error.message:'天气数据暂不可用');}finally{if(!abort.signal.aborted&&sequence===pointSequence.current)setPointLoading(false);}})();},350);
     return()=>{abort.abort();clearTimeout(timer);};
   },[picked,weatherEnabled]);
   useEffect(()=>{
@@ -25,9 +34,9 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
     const timer=setTimeout(()=>{const data=terrain.data.current;if(!data)return;void data.point(picked.lat,picked.lon).then(value=>{if(!cancelled)setPointElevation(value);}).catch(error=>{if(!cancelled)setElevationError(error instanceof Error?error.message:'海拔数据暂不可用');});},200);
     return()=>{cancelled=true;clearTimeout(timer);};
   },[picked]);
-  useEffect(()=>{let cancelled=false;const frame=requestAnimationFrame(()=>{const v=viewer.current;if(!v)return;v.resize();v.scene.requestRender();if(picked)void import('cesium').then(C=>{if(!cancelled&&!v.isDestroyed())v.camera.flyTo({destination:C.Cartesian3.fromDegrees(picked.lon,picked.lat,v.camera.positionCartographic.height),duration:.5});});});return()=>{cancelled=true;cancelAnimationFrame(frame);};},[picked]);
+  useEffect(()=>{const frame=requestAnimationFrame(()=>{viewer.current?.resize();viewer.current?.scene.requestRender();});return()=>cancelAnimationFrame(frame);},[picked]);
   const opacityRef=useRef(opacity),cloudStrengthRef=useRef(cloudStrength);opacityRef.current=opacity;cloudStrengthRef.current=cloudStrength;
-  const restack=()=>{const v=viewer.current;if(!v)return;for(const item of [weatherLayer,cloudLayer,windLayer])if(item.current&&v.imageryLayers.contains(item.current))v.imageryLayers.raiseToTop(item.current);v.scene.requestRender();};
+  const restack=()=>{const v=viewer.current;if(!v)return;for(const item of [weatherLayer,cloudLayer,windLayer,terrain.layer])if(item.current&&v.imageryLayers.contains(item.current))v.imageryLayers.raiseToTop(item.current);v.scene.requestRender();};
   const exitButton=useRef<HTMLButtonElement>(null),exitCallback=useRef(onExit);
   exitCallback.current=onExit;
   useEffect(()=>{
@@ -53,22 +62,26 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
       const remove=v.camera.moveEnd.addEventListener(move);move();
       const click=new C.ScreenSpaceEventHandler(v.scene.canvas);
       click.setInputAction((e:{position:import('cesium').Cartesian2})=>{const point=v.camera.pickEllipsoid(e.position,v.scene.globe.ellipsoid);if(!point)return;const cart=C.Cartographic.fromCartesian(point),lat=C.Math.toDegrees(cart.latitude),lon=C.Math.toDegrees(cart.longitude);setSelected(`${lat.toFixed(3)}°, ${lon.toFixed(3)}°`);
-        if(weatherEnabledRef.current){setPicked({lat,lon});v.entities.removeById('weather-point');v.entities.add({id:'weather-point',position:point,point:{pixelSize:10,color:C.Color.fromCssColorString('#7dd3fc'),outlineColor:C.Color.WHITE,outlineWidth:2,disableDepthTestDistance:Number.POSITIVE_INFINITY}});v.scene.requestRender();}},C.ScreenSpaceEventType.LEFT_CLICK);
+        if(weatherEnabledRef.current){setPicked({lat,lon});const height=v.camera.positionCartographic.height;requestAnimationFrame(()=>{if(!v.isDestroyed()){v.resize();v.camera.flyTo({destination:C.Cartesian3.fromDegrees(lon,lat,height),duration:.5});}});v.entities.removeById('weather-point');v.entities.add({id:'weather-point',position:point,point:{pixelSize:10,color:C.Color.fromCssColorString('#7dd3fc'),outlineColor:C.Color.WHITE,outlineWidth:2,disableDepthTestDistance:Number.POSITIVE_INFINITY}});v.scene.requestRender();}},C.ScreenSpaceEventType.LEFT_CLICK);
       cleanup=()=>{remove();click.destroy();v.destroy();viewer.current=null;};
       try {
         const imagery=await C.ArcGisMapServerImageryProvider.fromUrl('https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer',{enablePickFeatures:false,maximumLevel:19});
-        if(cancelled)return;v.imageryLayers.addImageryProvider(imagery);v.scene.requestRender();setReady(true);
+        if(cancelled)return;baseLayer.current=v.imageryLayers.addImageryProvider(imagery);baseCache.current.satellite=baseLayer.current;v.scene.requestRender();setReady(true);
       }catch{if(!cancelled)setError('卫星底图暂不可用，请稍后重新进入。');}
     })().catch(()=>{if(!cancelled)setError('当前设备无法启动地图，请尝试支持 WebGL 的浏览器。');});
     return()=>{cancelled=true;cleanup?.();css.remove();};
   },[]);
+  useEffect(()=>{
+    const v=viewer.current;if(!ready||!v)return;let stopped=false;setBaseNote('');
+    void (async()=>{let layer=baseCache.current[baseMap];if(!layer){const C=await import('cesium');if(stopped||v.isDestroyed())return;const provider=new C.UrlTemplateImageryProvider({url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png',maximumLevel:19,enablePickFeatures:false,credit:new C.Credit('<a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>',true)});provider.errorEvent.addEventListener(()=>{if(!stopped)setBaseNote('部分地图瓦片暂不可用，可切换卫星影像');});layer=v.imageryLayers.addImageryProvider(provider,0);baseCache.current.map=layer;}if(stopped)return;for(const [key,item] of Object.entries(baseCache.current))if(item)item.show=key===baseMap;baseLayer.current=layer;v.imageryLayers.lowerToBottom(layer);v.scene.requestRender();})().catch(()=>{if(!stopped)setBaseNote('底图切换失败，请稍后重试');});return()=>{stopped=true;};
+  },[ready,baseMap]);
   useEffect(()=>{
     if(!ready||!clouds)return;let cancelled=false;const abort=new AbortController();
     async function update(){try{const res=await fetch('/api/globe/clouds',{signal:abort.signal});if(res.status===401){onExpired();return;}if(!res.ok)throw Error();const meta=await res.json();const C=await import('cesium');const image=await C.SingleTileImageryProvider.fromUrl(meta.texturePath,{rectangle:C.Rectangle.MAX_VALUE,credit:'Contains modified EUMETSAT data · Live Cloud Maps'});if(cancelled||!viewer.current)return;const v=viewer.current;if(cloudLayer.current)v.imageryLayers.remove(cloudLayer.current);cloudLayer.current=v.imageryLayers.addImageryProvider(image);cloudLayer.current.alpha=cloudStrengthRef.current;restack();setCloudNote(`EUMETSAT · 约 3 小时发布 · ${meta.publishedAt?new Date(meta.publishedAt).toLocaleString():'观测时间未知'}`);}catch{if(!cancelled)setCloudNote('云图刷新失败，已加载的图层保留');}}
     void update();const timer=setInterval(update,15*60000);
     return()=>{cancelled=true;abort.abort();clearInterval(timer);const v=viewer.current;if(v&&cloudLayer.current){v.imageryLayers.remove(cloudLayer.current);cloudLayer.current=null;v.scene.requestRender();}};
   },[ready,clouds]);
-  const note=useWeatherLayers(viewer,ready,temperature,wind,opacityRef,weatherLayer,windLayer,restack,onExpired);
+  const note=useWeatherLayers(viewer,ready,temperature,wind,opacityRef,weatherLayer,windLayer,restack,onExpired,field);
   useEffect(()=>{if(weatherLayer.current)weatherLayer.current.alpha=opacity;viewer.current?.scene.requestRender();},[opacity]);
   useEffect(()=>{if(cloudLayer.current)cloudLayer.current.alpha=cloudStrength;viewer.current?.scene.requestRender();},[cloudStrength]);
   const referenceNote=useReferenceLayers(viewer,ready,boundaries,labels);
@@ -80,12 +93,16 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
   const fields=[['体感温度','apparent_temperature','°C',1],['相对湿度','relative_humidity_2m','%',0],['风速 · 10 m','wind_speed_10m','m/s',1],['风向 · 来向','wind_direction_10m','°',0],['阵风 · 10 m','wind_gusts_10m','m/s',1],['海平面气压','pressure_msl','hPa',1],['降水 · 统计时段','precipitation','mm',1],['总云量','cloud_cover','%',0]] as const;
   return <div className={picked?'explorer explorer--details':'explorer'}><div className="explorer-map">
     <div ref={container} className="explorer-canvas"/>
+    <CityWeather viewer={viewer} ready={ready} enabled={citiesEnabled} onPick={pickCity} onExpired={onExpired}/>
+    <PlaceSearch onExpired={onExpired} onPick={p=>{setPicked(p);setSelected(p.name);void import('cesium').then(C=>{const v=viewer.current;if(!v)return;v.entities.removeById('weather-point');v.entities.add({id:'weather-point',position:C.Cartesian3.fromDegrees(p.lon,p.lat),point:{pixelSize:12,color:C.Color.fromCssColorString('#7dd3fc'),outlineColor:C.Color.WHITE,outlineWidth:2}});const height=p.kind==='country'||p.kind==='ocean'?6000000:p.kind==='state'?2000000:p.kind==='city'?160000:p.kind==='coordinate'?30000:6000;v.camera.cancelFlight();v.camera.flyTo({destination:C.Cartesian3.fromDegrees(p.lon,p.lat,height),duration:1.2});});}}/>
+    <nav className="weather-dock" aria-label="天气图层快速切换">{(['temperature','wind','radar','satellite','humidity','pressure','cloud'] as const).map((value,i)=><button key={value} aria-pressed={value==='wind'?wind:value==='radar'?radarEnabled:value==='satellite'?clouds:temperature&&field===value} onClick={()=>choose(value)}><span>{['◉','≋','◌','☁','◒','◎','◐'][i]}</span>{value==='wind'?'风场':value==='radar'?'雷达':value==='satellite'?'卫星云图':weatherFields[value].label}</button>)}</nav>
+    {radarEnabled&&<section className="radar-timeline" aria-label="雷达历史回放"><div><button disabled={radar.frames.length<2} onClick={()=>radar.setPlaying(!radar.playing)} aria-label={radar.playing?'暂停雷达回放':'播放雷达历史'}>{radar.playing?'Ⅱ':'▶'}</button><strong>降水雷达</strong><time>{radar.frames[radar.index]?new Date(radar.frames[radar.index].time*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'加载中…'}</time><span>过去 2 小时</span></div><input aria-label="雷达历史时间" type="range" min="0" max={Math.max(0,radar.frames.length-1)} value={radar.index} disabled={!radar.frames.length} onChange={e=>{radar.setPlaying(false);radar.setIndex(+e.target.value);}}/><p>{radar.error||'帧生成时间 · 每 10 分钟一帧 · 回放每 10 秒前进一帧'}<br/>覆盖因地区而异，空白不代表无降水 · <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer ↗</a></p></section>}
     <button ref={exitButton} className="explorer-exit" type="button" onClick={onExit} title="返回地球（Esc）">← 返回地球 <kbd>Esc</kbd></button>
     <div className="explorer-tools" role="group" aria-label="叠加图层">
-      <details className="explorer-layer-menu"><summary>图层 <span>{[clouds,temperature,wind,boundaries,labels,elevation,hillshade,contours].filter(Boolean).length || ''}</span></summary><div className="explorer-layer-options">
-      <div className="layer-section-title">天气</div>
+      <details className="explorer-layer-menu"><summary>图层 <span>{[clouds,temperature,wind,radarEnabled,citiesEnabled,boundaries,labels,elevation,hillshade,contours].filter(Boolean).length || ''}</span></summary><div className="explorer-layer-options">
+      <div className="layer-section-title">天气显示</div><label><input type="checkbox" checked={citiesEnabled} onChange={e=>setCitiesEnabled(e.target.checked)}/>主要城市气温</label>
       <label><input type="checkbox" checked={clouds} onChange={e=>setClouds(e.target.checked)}/>近实时云图</label>
-      <label><input type="checkbox" checked={temperature} onChange={e=>setTemperature(e.target.checked)}/>空气温度</label>
+      <label><input type="checkbox" checked={temperature} onChange={e=>{setField('temperature');setTemperature(e.target.checked);setRadarEnabled(false);}}/>空气温度</label>
       <label><input type="checkbox" checked={wind} onChange={e=>setWind(e.target.checked)}/>风速 / 风向</label>
       {clouds&&<label title="只改变显示强弱，不代表云的物理厚度">云层叠加强度<input aria-label="云层叠加强度" type="range" min="0" max="1" step="0.05" value={cloudStrength} onChange={e=>setCloudStrength(+e.target.value)}/><span>{Math.round(cloudStrength*100)}%</span></label>}
       {(temperature||wind)&&<label>天气透明度<input type="range" min="0.1" max="0.9" step="0.05" value={opacity} onChange={e=>setOpacity(+e.target.value)}/></label>}
@@ -98,13 +115,18 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
       <label><input type="checkbox" checked={labels} onChange={e=>setLabels(e.target.checked)}/>地名</label>
       <p className="layer-hint">各层可同时开启 · 再点“图层”收起</p>
       </div></details>
+      <select aria-label="地图底图" value={baseMap} onChange={e=>setBaseMap(e.target.value as 'satellite'|'map')}><option value="satellite">卫星影像</option><option value="map">简洁地图</option></select>
+      <button aria-pressed={flat} onClick={()=>{const v=viewer.current;if(!v)return;if(flat)v.scene.morphTo3D(.8);else v.scene.morphTo2D(.8);setFlat(!flat);}}>{flat?'3D 地球':'2D 地图'}</button>
       <button onClick={()=>void zoom(.5)} aria-label="放大">＋</button><button onClick={()=>void zoom(2)} aria-label="缩小">－</button>
       <button onClick={()=>{void import('cesium').then(C=>viewer.current?.camera.flyTo({destination:C.Cartesian3.fromDegrees(103.82,1.35,21000000),duration:1.5}));}}>全球</button>
     </div>
-    <div className="explorer-info" role="status">
+    <div className={radarEnabled?"explorer-info explorer-info--radar":"explorer-info"} role="status">
       {error||(!ready?'加载卫星底图…':`视点高度 ${height} · 滚轮 / 双指连续缩放`)}
+      {baseNote&&<div>{baseNote}</div>}
       {clouds&&<div>{cloudNote||'加载云图…'}</div>}
-      {(temperature||wind)&&<><div>{note}</div><div className="weather-scale"/>{temperature&&<div>气温：−40 °C　　5 °C　　50 °C</div>}{wind&&<div>风速{temperature?'（箭头颜色）':''}：0　　15　　30+ m/s · 箭头指向下风向</div>}</>}
+      {(temperature||wind)&&<><div>{note}</div>{temperature&&<div className="weather-legend"><strong>{weatherFields[field].label} <small>{weatherFields[field].unit}</small></strong><div className="weather-scale" style={{background:fieldGradient(field)}}/><div className="weather-ticks">{weatherFields[field].ticks.map(t=><span key={t}>{t}</span>)}</div></div>}{wind&&<div className="weather-legend"><strong>风速 <small>m/s · 箭头指向下风向</small></strong><div className="weather-scale"/><div className="weather-ticks"><span>0</span><span>10</span><span>20</span><span>30+</span></div></div>}</>}
+      <a className="weather-data-link" href="/data/weather-attribution.html" target="_blank" rel="noreferrer">数据来源、精度与更新频率 ↗</a>
+      {citiesEnabled&&<div>城市气温 · Open-Meteo 模型估计 · 点击城市查看详情</div>}
       {(boundaries||labels)&&<div>{referenceNote||'参考界线 / 城市地名：Natural Earth'}</div>}
       {(elevation||hillshade||contours)&&<><div>{terrain.error||'Mapzen 地形 · 多源 DEM，精度因区域而异'}</div>{elevation&&<><div className="terrain-scale"/><div>海底　0　500　1,500　3,000　5,000+ m</div></>}{contours&&<div>放大显示等高线 · 等高距 20–500 m · 粗线为 5 倍等高距</div>}{hillshade&&<div>地形阴影为固定光照示意</div>}</>}
       {inspectEnabled&&!picked&&<div>点击地图，查看海拔{weatherEnabled?'与天气':''}详情</div>}{selected&&!picked&&<div>{selected} · WGS84</div>}

@@ -1,3 +1,4 @@
+import {fieldColor,type WeatherField} from './weather-palettes';
 import {interpolate,wrapLongitude,type Bounds,type WeatherGrid,type WeatherTile} from '../weather-tiles';
 const stops=[[-40,53,39,132],[-20,51,104,202],[0,58,177,207],[10,104,202,169],[20,235,220,127],[30,243,156,78],[40,213,75,63],[50,141,34,83]];
 export function weatherColor(value:number,temperature:boolean):number[]{
@@ -22,7 +23,7 @@ export function weatherSampler(global:WeatherGrid|null,tiles:WeatherTile[]){
     return interpolate(global.points,[bottom*24+left,bottom*24+right,(bottom+1)*24+left,(bottom+1)*24+right],x-left,y-bottom);
   };
 }
-export async function drawWeather(bounds:Bounds,global:WeatherGrid|null,tiles:WeatherTile[],temperature:boolean,wind:boolean,width:number,height:number,cancelled:()=>boolean){
+export async function drawWeather(bounds:Bounds,global:WeatherGrid|null,tiles:WeatherTile[],temperature:boolean,wind:boolean,width:number,height:number,cancelled:()=>boolean,field:WeatherField='temperature'){
   const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;
   const ctx=canvas.getContext('2d')!,pixels=ctx.createImageData(width,height),sample=weatherSampler(global,tiles);
   const east=bounds.east<=bounds.west?bounds.east+360:bounds.east;
@@ -31,13 +32,13 @@ export async function drawWeather(bounds:Bounds,global:WeatherGrid|null,tiles:We
     if(y%64===0){await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));if(cancelled())return null;}
     for(let x=0;x<width;x++){
       const data=at(x,y),value=temperature?data.temperature:data.wind;
-      if(value===null)continue;const i=(y*width+x)*4,color=weatherColor(value,temperature);
+      if(value===null)continue;const i=(y*width+x)*4,color=temperature?fieldColor(value,field):weatherColor(value,false);
       pixels.data[i]=color[0];pixels.data[i+1]=color[1];pixels.data[i+2]=color[2];pixels.data[i+3]=255;
     }
   }
   ctx.putImageData(pixels,0,0);
   // Thin 5°C contours expose actual field structure without adding fake texture.
-  if(temperature&&tiles.length){
+  if(temperature&&field==='temperature'&&tiles.length){
     ctx.strokeStyle='rgba(255,255,255,.22)';ctx.lineWidth=.65;
     for(let y=0;y<height-12;y+=12)for(let x=0;x<width-12;x+=12){
       const corners=[[x,y],[x+12,y],[x+12,y+12],[x,y+12]];
