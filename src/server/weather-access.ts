@@ -30,14 +30,14 @@ export async function weatherPoint(request:Request,db:D1Database,userKey:string)
   const lat=Number(latText),lon=Number(lonText);
   if(!latText||!lonText||!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180)return Response.json({error:'无效的经纬度'},{status:400,headers:{'Cache-Control':'no-store'}});
   const latitude=Number(lat.toFixed(2)),longitude=Number(lon.toFixed(2));
-  const data=await weatherData(db,`point:${latitude}:${longitude}`,1,1800,async()=>{
+  const data=await weatherData(db,`point-native-v2:${latitude}:${longitude}`,1,1800,async()=>{
     const upstream=new URL('https://api.open-meteo.com/v1/forecast');
-    upstream.search=new URLSearchParams({latitude:String(latitude),longitude:String(longitude),current:'temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,cloud_cover,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m',wind_speed_unit:'ms',timezone:'UTC',forecast_days:'1',cell_selection:'nearest'}).toString();
+    upstream.search=new URLSearchParams({latitude:String(latitude),longitude:String(longitude),current:'temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m',wind_speed_unit:'ms',timezone:'UTC',forecast_days:'1',elevation:'nan',cell_selection:'nearest'}).toString();
     const response=await fetch(upstream,{signal:AbortSignal.timeout(20000)});
     if(!response.ok)throw new Error('Weather unavailable');
     const payload=await response.json() as {latitude:number,longitude:number,current:Record<string,number|string|null>,current_units:Record<string,string>};
     if(!payload.current?.time||!Number.isFinite(payload.latitude)||!Number.isFinite(payload.longitude))throw new Error('Invalid weather response');
-    return {source:'Open-Meteo',time:payload.current.time+'Z',sampleLatitude:payload.latitude,sampleLongitude:payload.longitude,current:payload.current,units:payload.current_units,fetchedAt:new Date().toISOString()};
+    return {source:'Open-Meteo',temperatureKind:'air_2m',downscaling:'disabled',time:payload.current.time+'Z',sampleLatitude:payload.latitude,sampleLongitude:payload.longitude,current:payload.current,units:payload.current_units,fetchedAt:new Date().toISOString()};
   },userKey);
   return Response.json(data,{headers:{'Cache-Control':'private, max-age=300'}});
 }

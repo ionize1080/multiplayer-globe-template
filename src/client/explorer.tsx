@@ -15,7 +15,7 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
     if(!picked)return;const abort=new AbortController(),sequence=++pointSequence.current;
     setPointLoading(true);setPointError('');setPointWeather(null);
     // Brief debounce coalesces successive map clicks before spending quota.
-    const timer=setTimeout(()=>{void (async()=>{try{const response=await fetch(`/api/globe/point?lat=${picked.lat}&lon=${picked.lon}`,{signal:abort.signal});if(response.status===401){onExpired();return;}const data=await response.json();if(!response.ok)throw Error(data.error||'天气数据暂不可用');if(sequence===pointSequence.current)setPointWeather(data);}catch(error){if(!abort.signal.aborted&&sequence===pointSequence.current)setPointError(error instanceof Error?error.message:'天气数据暂不可用');}finally{if(!abort.signal.aborted&&sequence===pointSequence.current)setPointLoading(false);}})();},350);
+    const timer=setTimeout(()=>{void (async()=>{try{const response=await fetch(`/api/globe/point?v=2&lat=${picked.lat}&lon=${picked.lon}`,{signal:abort.signal});if(response.status===401){onExpired();return;}const data=await response.json();if(!response.ok)throw Error(data.error||'天气数据暂不可用');if(sequence===pointSequence.current)setPointWeather(data);}catch(error){if(!abort.signal.aborted&&sequence===pointSequence.current)setPointError(error instanceof Error?error.message:'天气数据暂不可用');}finally{if(!abort.signal.aborted&&sequence===pointSequence.current)setPointLoading(false);}})();},350);
     return()=>{abort.abort();clearTimeout(timer);};
   },[picked]);
   useEffect(()=>{let cancelled=false;const frame=requestAnimationFrame(()=>{const v=viewer.current;if(!v)return;v.resize();v.scene.requestRender();if(picked)void import('cesium').then(C=>{if(!cancelled&&!v.isDestroyed())v.camera.flyTo({destination:C.Cartesian3.fromDegrees(picked.lon,picked.lat,v.camera.positionCartographic.height),duration:.5});});});return()=>{cancelled=true;cancelAnimationFrame(frame);};},[picked]);
@@ -69,13 +69,13 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
   const metric=(key:string,digits=1)=>{const value=pointWeather?.current[key];return typeof value==='number'&&Number.isFinite(value)?value.toFixed(digits):'—';};
   const closePoint=()=>{setPicked(null);viewer.current?.entities.removeById('weather-point');viewer.current?.scene.requestRender();};
   const condition=()=>{const code=Number(pointWeather?.current.weather_code);if(code===0)return '晴';if(code<=3)return ['晴','大部晴朗','局部多云','阴'][code];if(code===45||code===48)return '雾';if(code>=51&&code<=57)return '毛毛雨';if(code>=61&&code<=67)return '雨';if(code>=71&&code<=77)return '雪';if(code>=80&&code<=82)return '阵雨';if(code===85||code===86)return '阵雪';if(code>=95)return '雷暴';return '暂无天气状况';};
-  const fields=[['体感温度','apparent_temperature','°C',1],['相对湿度','relative_humidity_2m','%',0],['风速 · 10 m','wind_speed_10m','m/s',1],['风向 · 来向','wind_direction_10m','°',0],['阵风 · 10 m','wind_gusts_10m','m/s',1],['地面气压','surface_pressure','hPa',1],['降水 · 统计时段','precipitation','mm',1],['总云量','cloud_cover','%',0]] as const;
+  const fields=[['体感温度','apparent_temperature','°C',1],['相对湿度','relative_humidity_2m','%',0],['风速 · 10 m','wind_speed_10m','m/s',1],['风向 · 来向','wind_direction_10m','°',0],['阵风 · 10 m','wind_gusts_10m','m/s',1],['海平面气压','pressure_msl','hPa',1],['降水 · 统计时段','precipitation','mm',1],['总云量','cloud_cover','%',0]] as const;
   return <div className={picked?'explorer explorer--details':'explorer'}><div className="explorer-map">
     <div ref={container} className="explorer-canvas"/>
     <button ref={exitButton} className="explorer-exit" type="button" onClick={onExit} title="返回地球（Esc）">← 返回地球 <kbd>Esc</kbd></button>
     <div className="explorer-tools" role="group" aria-label="叠加图层">
       <label><input type="checkbox" checked={clouds} onChange={e=>setClouds(e.target.checked)}/>近实时云图</label>
-      <label><input type="checkbox" checked={temperature} onChange={e=>setTemperature(e.target.checked)}/>气温</label>
+      <label><input type="checkbox" checked={temperature} onChange={e=>setTemperature(e.target.checked)}/>空气温度</label>
       <label><input type="checkbox" checked={wind} onChange={e=>setWind(e.target.checked)}/>风速 / 风向</label>
       <label><input type="checkbox" checked={boundaries} onChange={e=>setBoundaries(e.target.checked)}/>地理界线</label>
       <label><input type="checkbox" checked={labels} onChange={e=>setLabels(e.target.checked)}/>地名</label>
@@ -95,9 +95,9 @@ export default function Explorer({onExpired,onExit}:{onExpired:()=>void,onExit:(
       <header className="weather-details-heading"><div><span className="weather-eyebrow">LOCAL WEATHER</span><h2>点位天气</h2></div><button type="button" onClick={closePoint} aria-label="关闭天气详情">×</button></header>
       <p className="weather-coordinates">{Math.abs(picked.lat).toFixed(4)}° {picked.lat>=0?'N':'S'}　{Math.abs(picked.lon).toFixed(4)}° {picked.lon>=0?'E':'W'}</p>
       <div className="weather-point-status" role="status" aria-live="polite">{pointLoading?'正在获取该点天气…':pointError||(pointWeather?new Date(pointWeather.time).toLocaleString()+' · 模型有效时间':'')}</div>
-      {pointWeather&&<><div className="weather-temperature"><span>{metric('temperature_2m')}</span><span>°C</span><p>气温 · 离地 2 m</p></div>
+      {pointWeather&&<><div className="weather-temperature"><span>{metric('temperature_2m')}</span><span>°C</span><p>空气温度 · 地表上方 2 m，非水温</p></div>
         <dl className="weather-metrics">{fields.map(([label,key,unit,digits])=><div key={key}><dt>{label}</dt><dd>{metric(key,digits)}<small>{unit}</small></dd></div>)}</dl>
-        <div className="weather-detail-note">天气状况：{condition()}（{metric('weather_code',0)}）<br/>降水统计时段：{typeof pointWeather.current.interval==='number'?pointWeather.current.interval/60:'—'} 分钟<br/>模型取样：{pointWeather.sampleLatitude.toFixed(4)}°, {pointWeather.sampleLongitude.toFixed(4)}°<br/>模型估计，非现场测站实测。不同地区模型精度不同。</div>
+        <div className="weather-detail-note">天气状况：{condition()}（{metric('weather_code',0)}）<br/>降水统计时段：{typeof pointWeather.current.interval==='number'?pointWeather.current.interval/60:'—'} 分钟<br/>模型取样：{pointWeather.sampleLatitude.toFixed(4)}°, {pointWeather.sampleLongitude.toFixed(4)}°<br/>原生模型气温，未按地形海拔二次修正。非水温，非测站实测。</div>
         <a className="weather-source" href="https://open-meteo.com/" target="_blank" rel="noreferrer">Weather data by Open-Meteo ↗</a></>}
     </aside>}
   </div>;

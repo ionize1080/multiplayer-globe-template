@@ -33,7 +33,7 @@ test('regional endpoint batches 25 WGS84 locations, shares cache and labels a bo
       calls++;const url=new URL(String(input));assert.equal(url.hostname,'api.open-meteo.com');
       const lat=url.searchParams.get('latitude')!.split(',').map(Number),lon=url.searchParams.get('longitude')!.split(',').map(Number);
       assert.equal(lat.length,25);assert.equal(lat[0],1);assert.equal(lon[0],103);assert.equal(lat[24],2);assert.equal(lon[24],104);
-      assert.equal(url.searchParams.get('cell_selection'),'nearest');
+      assert.equal(url.searchParams.get('cell_selection'),'nearest');assert.equal(url.searchParams.get('elevation'),'nan','lake cells must not receive a second lapse-rate correction');
       return Response.json(lat.map(()=>({current:{time:'2026-11-03T08:00',temperature_2m:28,wind_speed_10m:2,wind_direction_10m:359}})));
     };
     const request=new Request('https://ionize.club/api/globe/tile?level=4&x=283&y=91');

@@ -14,7 +14,7 @@ export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperat
     const v=viewer.current;if(!v)return;
     const globalData=()=>{
       if(global.current&&Date.now()-Date.parse(global.current.fetchedAt)<15*60000)return Promise.resolve(global.current);
-      if(!globalPending.current)globalPending.current=(async()=>{const response=await fetch('/api/globe/weather');if(response.status===401)onExpired();if(!response.ok)throw Error('全球概览暂不可用');const data=await response.json() as WeatherGrid;global.current=data;return data;})().finally(()=>{globalPending.current=null;});
+      if(!globalPending.current)globalPending.current=(async()=>{const response=await fetch('/api/globe/weather?v=2');if(response.status===401)onExpired();if(!response.ok)throw Error('全球概览暂不可用');const data=await response.json() as WeatherGrid;global.current=data;return data;})().finally(()=>{globalPending.current=null;});
       return globalPending.current;
     };
     const tileData=async(tile:ReturnType<typeof planWeatherTiles>[number],stillNeeded:()=>boolean)=>{
@@ -27,7 +27,7 @@ export function useWeatherLayers(viewer:RefObject<Viewer>,ready:boolean,temperat
       const joined=pending.current.get(tile.key);if(joined)return joined;
       if(Date.now()<cooldown.current)return Promise.reject(Error('请求限额保护中，保留概览或已缓存数据'));
       const promise=(async()=>{
-        const response=await fetch(`/api/globe/tile?level=${tile.level}&x=${tile.x}&y=${tile.y}`);
+        const response=await fetch(`/api/globe/tile?v=2&level=${tile.level}&x=${tile.x}&y=${tile.y}`);
         if(response.status===401){onExpired();throw Error('登录已过期');}
         if(response.status===429){cooldown.current=Date.now()+60000;throw Error('请求限额保护中，保留概览或已缓存数据');}
         if(!response.ok)throw Error('细网格暂不可用，保留概览或已缓存数据');
