@@ -1,11 +1,13 @@
 import {useEffect,useRef,useState,type RefObject} from 'react';
 import type {Viewer,ImageryLayer} from 'cesium';
+import {visibleRectangle} from './visible-rectangle';
 import {atlasMeta,type AtlasLayer,type AtlasRecords} from '../atlas';
 import type {RasterKind,RasterTask} from './atlas-raster';
 type RasterReply={bitmap?:ImageBitmap;value?:number};
 export function useAtlas(viewer:RefObject<Viewer>,ready:boolean,enabled:boolean,layer:AtlasLayer,taxon:number,filter:string,opacity:number,picked:{lat:number;lon:number}|null,onExpired:()=>void){
  const [note,setNote]=useState(''),[records,setRecords]=useState<AtlasRecords|null>(null),[recordNote,setRecordNote]=useState(''),[pointClass,setPointClass]=useState<number|null>(null),[pointNote,setPointNote]=useState('');
  const imagery=useRef<ImageryLayer|null>(null),task=useRef<((t:Omit<RasterTask,'id'>)=>Promise<RasterReply>)|null>(null),expired=useRef(onExpired),alpha=useRef(opacity);expired.current=onExpired;alpha.current=opacity;
+ const [revision,refresh]=useState(0);
  const cache=useRef(new Map<string,{at:number;data:AtlasRecords}>());
  useEffect(()=>{const v=viewer.current;if(!enabled||!ready||!v)return;let stopped=false,worker:Worker|undefined;const pending=new Map<number,{resolve:(v:RasterReply)=>void;reject:(e:Error)=>void}>();let id=0;setNote('正在加载图谱…');
   void import('cesium').then(C=>{if(stopped||v.isDestroyed())return;const scheme=new C.GeographicTilingScheme();let provider:import('cesium').UrlTemplateImageryProvider;
@@ -30,12 +32,12 @@ export function useAtlas(viewer:RefObject<Viewer>,ready:boolean,enabled:boolean,
  },[enabled,ready,layer,picked]);
  useEffect(()=>{
   setRecords(null);setRecordNote('');const v=viewer.current;if(!ready||!enabled||!v||layer==='climate'||layer==='landform')return;let stopped=false,abort:AbortController|undefined,timer:ReturnType<typeof setTimeout>|undefined,sequence=0,remove:(()=>void)|undefined;
-  void import('cesium').then(C=>{if(stopped)return;const update=()=>{const bounds=v.camera.computeViewRectangle();if(!bounds)return;const rad=C.Math.toDegrees,w=rad(bounds.west),e=rad(bounds.east),s=rad(bounds.south),n=rad(bounds.north),span=(e-w+360)%360||360;const current=++sequence;abort?.abort();if(span>35||n-s>25){setRecords(null);setRecordNote('放大地图查看具体'+(layer==='minerals'?'矿点':'物种观测')+(layer==='minerals'&&filter!=='all'?'':'；当前显示全局记录分布'));return;}
+  void import('cesium').then(C=>{if(stopped)return;const update=()=>{const bounds=visibleRectangle(v,C);if(!bounds)return;const rad=C.Math.toDegrees,w=rad(bounds.west),e=rad(bounds.east),s=rad(bounds.south),n=rad(bounds.north),span=(e-w+360)%360||360;const current=++sequence;abort?.abort();if(span>35||n-s>25){setRecords(null);setRecordNote('放大地图查看具体'+(layer==='minerals'?'矿点':'物种观测')+(layer==='minerals'&&filter!=='all'?'':'；当前显示全局记录分布'));return;}
     const params=new URLSearchParams({layer,taxon:String(taxon),filter,west:(Math.floor(w*1000)/1000).toFixed(3),east:(Math.ceil(e*1000)/1000).toFixed(3),south:(Math.max(-90,Math.floor(s*1000)/1000)).toFixed(3),north:(Math.min(90,Math.ceil(n*1000)/1000)).toFixed(3)}),key=params.toString(),hit=cache.current.get(key);if(hit&&Date.now()-hit.at<600000){setRecords(hit.data);setRecordNote('');return;}
     setRecords(null);setRecordNote('正在查询视野内的公开记录…');const controller=new AbortController();abort=controller;
     void fetch('/api/globe/atlas/records?'+key,{signal:controller.signal}).then(async r=>{if(r.status===401){expired.current();throw Error();}if(!r.ok)throw Error();return await r.json() as AtlasRecords;}).then(data=>{if(stopped||current!==sequence)return;cache.current.set(key,{at:Date.now(),data});while(cache.current.size>64)cache.current.delete(cache.current.keys().next().value!);setRecords(data);setRecordNote(data.records.length?'':'当前视野内暂无已收录记录，可移动或缩小地图。');}).catch(()=>{if(!stopped&&!controller.signal.aborted&&current===sequence)setRecordNote('记录查询暂不可用，请移动地图重试');});
    };const schedule=()=>{clearTimeout(timer);timer=setTimeout(update,650);};remove=v.camera.moveEnd.addEventListener(schedule);schedule();});
   return()=>{stopped=true;abort?.abort();clearTimeout(timer);remove?.();};
- },[ready,enabled,layer,taxon,filter]);
- return {note,records,recordNote,pointClass,pointNote,imagery};
+ },[ready,enabled,layer,taxon,filter,revision]);
+ return {note,records,recordNote,pointClass,pointNote,imagery,refresh:()=>{cache.current.clear();refresh(n=>n+1);}};
 }

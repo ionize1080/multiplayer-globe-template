@@ -1,5 +1,7 @@
+import {atlasStats} from './atlas-stats';
+import {speciesDetails} from './species';
 import {atlasData,atlasRecords} from './atlas';
-import {satelliteScene,satelliteImage,SatelliteError} from './satellite';
+import {satelliteScene,satelliteTimeline,satelliteImage,SatelliteError} from './satellite';
 import {pointLocation} from './location-details';
 import { searchPlaces } from './place-search';
 import { cityWeather } from './weather-cities';
@@ -639,9 +641,12 @@ export default {
         if(auth)return auth;
         const user=await globeUser(request,env.MAIL_DB);
         if(!user)return Response.json({error:'请先使用 IONACS 邮箱登录'},{status:401,headers:{'Cache-Control':'no-store'}});
+        if(request.method==='GET'&&url.pathname==='/api/globe/atlas/stats')return await atlasStats(request);
+        if(request.method==='GET'&&url.pathname==='/api/globe/atlas/species')return await speciesDetails(request);
         if(request.method==='GET'&&url.pathname==='/api/globe/atlas/records')return await atlasRecords(request);
         if(request.method==='GET'&&url.pathname.startsWith('/api/globe/atlas/'))return await atlasData(request,ctx);
         if(request.method==='GET'&&url.pathname.startsWith('/api/globe/terrain/'))return await terrainTile(request);
+        if(request.method==='GET'&&url.pathname==='/api/globe/satellite/timeline')return await satelliteTimeline(request,env,await digest(user.email));
         if(request.method==='GET'&&url.pathname==='/api/globe/satellite/scene')return await satelliteScene(request,env,await digest(user.email));
         if(request.method==='GET'&&url.pathname.startsWith('/api/globe/satellite/image/'))return await satelliteImage(request,env,await digest(user.email),ctx);
         if(request.method==='GET'&&url.pathname==='/api/globe/location')return await pointLocation(request,env.MAIL_DB,await digest(user.email));

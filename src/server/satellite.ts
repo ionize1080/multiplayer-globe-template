@@ -1,4 +1,5 @@
-import {satelliteView,selectSatelliteScene,satelliteProcess,type SatelliteManifest,type SatelliteMode} from '../satellite';
+import {satelliteView,selectSatelliteScene,satelliteProcess,type SatelliteManifest,type SatelliteMode,type SatelliteScene} from '../satellite';
+import {satelliteRows,satelliteSequence,satelliteTarget,toleranceDays,SATELLITE_START,DAY,type SatelliteInterval} from '../satellite-timeline';
 import {digest} from './globe-auth';
 import {weatherData} from './weather-access';
 type SatelliteEnv=Pick<Env,'MAIL_DB'>&{CDSE_CLIENT_ID?:string;CDSE_CLIENT_SECRET?:string};
@@ -24,7 +25,7 @@ async function cdse(env:SatelliteEnv,path:'/api/v1/catalog/1.0.0/search'|'/api/v
 }
 async function budget(db:D1Database,user:string,units:number){
  const now=Math.floor(Date.now()/1000),d=new Date(),month=d.toISOString().slice(0,7),monthEnd=Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1)/1000;
- const limits:[string,number,number,number][]=[[`cdse-requests-month:${month}`,1,8000,monthEnd],[`cdse-units-month:${month}`,units,8000,monthEnd],[`cdse-requests-minute:${Math.floor(now/60)}`,1,30,now+120],[`cdse-requests-day:${Math.floor(now/86400)}`,1,300,now+86400],[`cdse-user:${user}:${Math.floor(now/60)}`,1,24,now+120]];
+ const limits:[string,number,number,number][]=[[`cdse-requests-month:${month}`,1,8000,monthEnd],[`cdse-units-month:${month}`,units,8000,monthEnd],[`cdse-requests-minute:${Math.floor(now/60)}`,1,90,now+120],[`cdse-requests-day:${Math.floor(now/86400)}`,1,300,now+86400],[`cdse-user:${user}:${Math.floor(now/60)}`,1,60,now+120]];
  const results=await db.batch(limits.map(([key,cost,max,expires])=>db.prepare('INSERT INTO globe_weather_usage(bucket,used,expires_at) VALUES(?,?,?) ON CONFLICT(bucket) DO UPDATE SET used=used+excluded.used WHERE used+excluded.used<=? RETURNING used').bind(key,cost,expires,max)));
  if(results.some(r=>!r.results.length))throw new SatelliteError('近期卫星请求已达保护额度，请稍后再试',429);
 }
@@ -55,6 +56,50 @@ export async function satelliteScene(request:Request,env:SatelliteEnv,user:strin
   return {scene:manifest};
  },undefined,undefined,{prefix:'satellite-cache',minute:1000,hour:10000,day:100000});
  return Response.json(data,{headers:{'Cache-Control':'private, max-age=300'}});
+}
+/** Metadata only: no Process API call occurs until an authenticated image URL is requested. */
+export async function satelliteTimeline(request:Request,env:SatelliteEnv,user:string){
+ const q=new URL(request.url).searchParams,values=['west','east','south','north'].map(k=>q.get(k));
+ if(values.some(v=>!v?.trim()))return Response.json({error:'请提供完整视野范围'},{status:400});
+ const view=satelliteView({west:Number(values[0]),east:Number(values[1]),south:Number(values[2]),north:Number(values[3])});
+ if(!view)return Response.json({error:'请放大至城市或区域范围（视野不超过 160 km）'},{status:400});
+ const kind=q.get('kind')||'sequence',interval=(q.get('interval')||'recent') as SatelliteInterval,count=Number(q.get('count')||15),page=Number(q.get('page')||0),now=Date.now();
+ if(!['sequence','browse'].includes(kind)||!['recent','week','month','quarter'].includes(interval)||![5,10,15,20,25,30].includes(count)||!Number.isInteger(page)||page<0||page>100)return Response.json({error:'无效的时间序列参数'},{status:400});
+ const month=q.get('month')||new Date(now).toISOString().slice(0,7);
+ if(!/^20\d{2}-(0[1-9]|1[0-2])$/.test(month)||month<'2017-01'||month>new Date(now).toISOString().slice(0,7))return Response.json({error:'请选择 2017 年至今的月份'},{status:400});
+ const anchor=Date.parse(new Date(now).toISOString().slice(0,10)+'T23:59:59.999Z'),monthStart=Date.parse(month+'-01T00:00:00Z'),d=new Date(monthStart);
+ let end=kind==='browse'?Math.min(now,Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1)-1):now;
+ let start=kind==='browse'?monthStart:Math.max(SATELLITE_START,interval==='recent'?anchor-365*DAY:satelliteTarget(anchor,interval,count-1)-toleranceDays[interval]*DAY);
+ const b=view.bounds,signal=AbortSignal.any([request.signal,AbortSignal.timeout(60000)]),features:SatelliteScene[]=[];
+ let next:number|undefined,finished=false;
+ for(let i=0;i<24;i++){
+  signal.throwIfAborted();
+  const cursor=next,dayEnd=new Date(end).toISOString().slice(0,10);
+  const result=await weatherData(env.MAIL_DB,`satellite-catalog-v2:${view.key}:${start}:${dayEnd}:${cursor??0}`,0,900,async()=>{
+   await budget(env.MAIL_DB,user,0);
+   const r=await cdse(env,'/api/v1/catalog/1.0.0/search',{collections:['sentinel-2-l2a'],intersects:{type:'Point',coordinates:[(b.west+b.east)/2,(b.south+b.north)/2]},datetime:new Date(start).toISOString()+'/'+new Date(end).toISOString(),limit:100,fields:{include:['id','properties.datetime','properties.eo:cloud_cover'],exclude:['assets','links','geometry','bbox']},...(cursor===undefined?{}:{next:cursor})},AbortSignal.any([signal,AbortSignal.timeout(25000)]));
+   const payload=await r.json() as {features?:unknown[];context?:{next?:unknown}};
+   if(!Array.isArray(payload.features)||payload.features.length>100)throw new SatelliteError('卫星目录返回异常');
+   const n=payload.context?.next;if(n!==undefined&&n!==null&&!(typeof n==='number'&&Number.isSafeInteger(n)&&n>(cursor??-1)))throw new SatelliteError('卫星目录分页异常');
+   return {rows:satelliteRows(payload.features,start,end),next:typeof n==='number'?n:null};
+  },undefined,undefined,{prefix:'satellite-cache',minute:1000,hour:10000,day:100000}) as {rows:SatelliteScene[];next:number|null};
+  features.push(...result.rows);next=result.next??undefined;
+  if(next===undefined){
+   if(kind==='sequence'&&interval==='recent'&&new Set(features.map(r=>r.acquiredAt)).size<count&&start>SATELLITE_START){end=start-1;start=Math.max(SATELLITE_START,start-365*DAY);continue;}
+   finished=true;break;
+  }
+ }
+ if(!finished)throw new SatelliteError('此区域观测过于密集，请减少动画张数或按月份浏览');
+ const rows=[...new Map(features.map(r=>[r.acquiredAt,r])).values()].sort((a,b)=>Date.parse(b.acquiredAt)-Date.parse(a.acquiredAt));
+ const selected=kind==='browse'?rows.slice(page*10,page*10+10):satelliteSequence(rows,interval,count,anchor);
+ // Animation is capped at 512 px to bound decoding, GPU memory and transfer costs.
+ const scale=kind==='sequence'?Math.min(1,512/Math.max(view.width,view.height)):1,width=Math.max(1,Math.round(view.width*scale)),height=Math.max(1,Math.round(view.height*scale));
+ const scenes=await Promise.all(selected.map(async scene=>{
+  const key=await digest(JSON.stringify([scene.id,scene.acquiredAt,view.key,width,height,'rgb-v1']));
+  return {...scene,bounds:b,width,height,resolutionMeters:Math.round(view.resolutionMeters/scale),key,imageUrl:`/api/globe/satellite/image/${key}.png`,mode:'latest' as const,checkedAt:new Date(now).toISOString()};
+ }));
+ if(scenes.length)await env.MAIL_DB.batch(scenes.map(scene=>env.MAIL_DB.prepare('INSERT INTO globe_weather_cache(cache_key,payload,expires_at) VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload,expires_at=excluded.expires_at').bind('satellite-manifest:'+scene.key,JSON.stringify(scene),Math.floor(now/1000)+7*86400)));
+ return Response.json({scenes,page,total:kind==='browse'?rows.length:scenes.length,hasMore:kind==='browse'&&(page+1)*10<rows.length,requested:count,missing:kind==='sequence'?count-scenes.length:0,toleranceDays:toleranceDays[interval],searchedFrom:new Date(start).toISOString(),checkedAt:new Date(now).toISOString()},{headers:{'Cache-Control':'private, max-age=300'}});
 }
 export async function satelliteImage(request:Request,env:SatelliteEnv,user:string,ctx:ExecutionContext){
  const match=/^\/api\/globe\/satellite\/image\/([a-f0-9]{64})\.png$/.exec(new URL(request.url).pathname);if(!match)return new Response(null,{status:404});
